@@ -461,10 +461,6 @@ def process_excel_file(uploaded_file, client):
                     "Reclamações Anteriores": "N/A (Interno)",
                     "Urgência": "N/A (Interno)"
                 })
-            
-            # Registrar tempo da linha
-            row_end = time.time()
-            times_per_row.append(row_end - row_start)
                 
             else:  # Externo
                 # Análise EXTERNA: 100-1000 pontos
