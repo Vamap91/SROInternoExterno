@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
-import openai
 from openai import OpenAI
 import json
 from datetime import datetime
 import re
+from io import BytesIO
 
 st.set_page_config(
-    page_title="Análise de Risco de Externalização",
+    page_title="Análise de Risco de Externalização - Base Manifestações",
     page_icon="⚠️",
     layout="wide"
 )
@@ -19,98 +19,138 @@ except Exception as e:
     st.error("⚠️ Erro ao configurar OpenAI API. Verifique se a chave está configurada em Settings > Secrets do Streamlit.")
     st.stop()
 
-def classify_channel_risk(channel_value):
+def classify_channel_type(channel_value):
     """
-    Classifica o peso de risco baseado no canal (coluna CANAL_DE_ENTRADA_MANIFESTACAO)
+    Classifica o canal como Interno ou Externo
     
-    Pesos conforme solicitado:
-    - Ext. Ouvidoria: 100 pontos (mais crítico)
+    Pesos dos canais externos:
+    - Ext. Ouvidoria: 100 pontos
     - Externo / Web - Reclame Aqui: 75 pontos
     - Externo - Focais: 50 pontos
-    - Interno: 0 pontos (para análise de externalização)
     """
     if pd.isna(channel_value):
-        return 0, "Não classificado"
+        return "Interno", 0
     
     channel_str = str(channel_value).strip().lower()
     
-    # Ext. Ouvidoria - 100 pontos (mais crítico)
+    # Externos
     if "ouvidoria" in channel_str:
-        return 100, "Ext. Ouvidoria"
-    
-    # Web - Reclame Aqui / Externo (sem focais) - 75 pontos
+        return "Externo", 100
     elif "reclame aqui" in channel_str or "reclameaqui" in channel_str:
-        return 75, "Web - Reclame Aqui"
-    elif "externo" in channel_str and "focais" not in channel_str:
-        return 75, "Externo"
+        return "Externo", 75
+    elif "focais" in channel_str or "externo - focais" in channel_str:
+        return "Externo", 50
+    elif "externo" in channel_str:
+        return "Externo", 75
     
-    # Externo - Focais - 50 pontos
-    elif "focais" in channel_str or "ext. focais" in channel_str or "externo - focais" in channel_str:
-        return 50, "Externo - Focais"
-    
-    # Interno - 0 pontos
-    elif "interno" in channel_str or "interna" in channel_str:
-        return 0, "Interno"
-    
+    # Internos
     else:
-        return 0, "Não classificado"
+        return "Interno", 0
 
-def analyze_internal_to_external_risk(client, text_content, channel_type):
+def analyze_internal_risk(client, text, nr_ocorrencia="N/A"):
     """
-    Análise 1: Risco de reclamações INTERNAS virarem EXTERNAS (0-100)
+    EIXO 1: Análise de risco de reclamações INTERNAS virarem EXTERNAS (0-100 pontos)
+    
+    Usa a metodologia completa do código original SRO
     """
     
-    prompt = f"""Você é um analista de risco especializado em prever a probabilidade de reclamações internas se tornarem externas.
+    prompt = f"""Você é um analista preditivo especializado em prever o risco de reclamações internas se tornarem externas.
 
 CONTEXTO:
-Esta é uma reclamação atualmente classificada como: {channel_type}
+Esta é uma reclamação INTERNA (NR_OCORRENCIA: {nr_ocorrencia})
 
 TEXTO DA RECLAMAÇÃO:
-{text_content}
+{text}
 
 TAREFA:
-Analise o texto e calcule o risco (0-100) de esta reclamação se tornar externa (ReclameAqui, Procon, Ouvidoria).
+Analise o texto e calcule o risco (0-100 pontos) de esta reclamação INTERNA se tornar EXTERNA (ReclameAqui, Procon, Ouvidoria).
 
-FATORES A CONSIDERAR (pontuação 0-100):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+METODOLOGIA DE ANÁLISE (EIXO 1 - INTERNALIZAÇÃO → EXTERNALIZAÇÃO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. INDICADORES DE EXTERNALIZAÇÃO (peso alto):
-   - Menções a "ReclameAqui", "Procon", "advogado", "processar": +20 pts cada
-   - Menções a "ouvidoria", "órgão de defesa": +15 pts cada
-   - Ameaças diretas ("vou publicar", "vou denunciar"): +25 pts cada
-   - Menção a corretor/corretora: +10 pts
-   - Múltiplos canais de contato: +10 pts
+Fatores Preditivos e Pesos:
 
-2. ESTADO EMOCIONAL (peso médio):
-   - Palavras críticas ("absurdo", "inaceitável", "revoltado", "indignado"): +5 pts cada
-   - Frustração com processo ("ninguém resolve", "já tentei X vezes"): +10 pts
-   - Ultimatos ("última vez", "prazo de X dias"): +15 pts
+1. FREQUÊNCIA DE CONTATOS – Peso 4 (máximo 40 pontos)
+   - 1 contato: 0 pts (risco baixo)
+   - 2 contatos: 5 pts (risco médio)
+   - 3+ contatos: 10 pts (risco elevado)
+   
+   Atenuação: Se múltiplos contatos contêm palavras neutras de acompanhamento, reduzir pontos.
+   
+   Palavras neutras: fila, data, equipe, atualização, agenda, recontato, inserido, tabela, negociado, complemento, evento, telefone, inicial, observação, pergunta, item, escala, criação, responsável, cancelado, negativa, técnica, cobertura, atendimento
 
-3. GRAVIDADE DO PROBLEMA (peso médio):
-   - Problemas técnicos graves (defeito, dano, prejuízo, mal feito, torto, amassado): +10 pts
-   - Múltiplas tentativas sem resolução: +15 pts
-   - Tempo de espera excessivo (muitos dias): +10 pts
-   - Falta de cuidado/qualidade: +10 pts
+2. TEMPO DE ESPERA / ATRASOS – Peso 3 (máximo 30 pontos)
+   - Menção a atrasos: +10 pts
+   - Menção a "dias", "semanas" de espera: +10 pts
+   - Menção a prazos não cumpridos: +10 pts
 
-4. ATENUANTES (reduzem risco):
-   - Negativa técnica sem insatisfação explícita: -20 pts
-   - Procedimentos administrativos padrão: -10 pts
-   - Palavras positivas ou neutras: -5 pts cada
+3. FALHAS OPERACIONAIS – Peso 2 (máximo 20 pontos)
+   
+   A. Indícios técnicos graves (10 pts cada):
+      - defeito, conserto, danos, sinistro, vazamento, barulho, quebra
+      - arranhado, sujo, manchado, escorrida, descolado, solto
+      - acendendo, parou, sumiu, faltando, faltou, errado, errada
+      - incompleto, danificado, estragado, pior, voltou
+      - torto, amassado, mal feito, falta de cuidado
+   
+   B. Falhas de processo (5 pts cada):
+      - cadastro incorreto, solicitações não atendidas
+      - falhas de comunicação, problemas técnicos pós-serviço
+      - cada atendente dá informação diferente
+
+4. ESTADO EMOCIONAL – Peso 1 (máximo 10 pontos)
+   
+   Termos negativos moderados (1 pt cada):
+   - terrível, péssimo, horrível, decepcionado, frustrado
+   - reclamar, problema, erro, falha, demora, demorado
+   - insatisfeito, revoltado, indignado, absurdo, inaceitável
+   
+   Termos de risco jurídico (3 pts cada):
+   - processar, advogado, jurídico, procon, denúncia
+   - órgão, fiscalização, consumidor, direito, prejuízo
+   
+   Termos positivos (reduzem -1 pt cada):
+   - excelente, ótimo, perfeito, maravilhoso, fantástico
+   - agradecer, obrigado, parabéns, satisfeito, contente
+   - recomendo, eficiente, rápido, atencioso, prestativo
+
+REGRA ESPECIAL - Negativas Técnicas:
+Se o texto contém apenas negativa técnica/cancelamento SEM insatisfação explícita do cliente:
+→ Score máximo = 30 pontos (Baixo)
+
+Para elevar acima de 30, deve haver:
+- Manifestação direta de descontentamento
+- Termos emocionais negativos do cliente
+- Questionamento da decisão técnica
+- Ameaças ou menções a órgãos externos
+- Múltiplos contatos com tom de cobrança
+
+CÁLCULO FINAL:
+1. Atribua score (0-10) para cada fator
+2. Multiplique pelo peso do fator
+3. Some os valores ponderados (máximo 100)
+4. Aplique regra especial se for negativa técnica
+5. Classifique:
+   - Baixo: 0-30 pontos
+   - Médio: 31-60 pontos
+   - Alto: 61-85 pontos
+   - Crítico: 86-100 pontos
 
 FORMATO DE SAÍDA (JSON):
 {{
     "risk_score": <número de 0 a 100>,
     "risk_level": "<Baixo/Médio/Alto/Crítico>",
+    "frequency_score": <0-40>,
+    "delay_score": <0-30>,
+    "operational_score": <0-20>,
+    "emotional_score": <0-10>,
     "key_factors": ["fator1", "fator2", "fator3"],
     "detected_threats": ["ameaça1", "ameaça2"],
-    "emotional_tone": "<descrição breve do tom emocional>",
+    "emotional_tone": "<descrição do tom emocional>",
+    "is_technical_negative": <true/false>,
     "recommendation": "<recomendação de ação>"
 }}
-
-CLASSIFICAÇÃO:
-- Baixo: 0-30
-- Médio: 31-60
-- Alto: 61-85
-- Crítico: 86-100
 
 Retorne APENAS o JSON, sem texto adicional."""
 
@@ -118,197 +158,239 @@ Retorne APENAS o JSON, sem texto adicional."""
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "Você é um analista de risco especializado em prever externalizações de reclamações."},
+                {"role": "system", "content": "Você é um analista preditivo especializado em prever externalizações de reclamações usando metodologia ponderada."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=800
+            temperature=0.2,
+            max_tokens=1000
         )
         
         result_text = response.choices[0].message.content.strip()
-        
-        # Extrair JSON da resposta
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        
         if json_match:
-            result = json.loads(json_match.group())
-            return result
+            return json.loads(json_match.group())
         else:
-            return {
-                "risk_score": 0,
-                "risk_level": "Erro",
-                "key_factors": ["Erro ao processar resposta"],
-                "detected_threats": [],
-                "emotional_tone": "N/A",
-                "recommendation": "Revisar manualmente"
-            }
+            return create_error_result("Erro ao processar resposta da IA")
+            
     except Exception as e:
-        st.error(f"Erro na análise: {str(e)}")
-        return {
-            "risk_score": 0,
-            "risk_level": "Erro",
-            "key_factors": [str(e)],
-            "detected_threats": [],
-            "emotional_tone": "N/A",
-            "recommendation": "Erro na análise"
-        }
+        return create_error_result(str(e))
 
-def analyze_external_repeat_risk(client, text_content, channel_type, channel_risk_score):
+def analyze_external_risk(client, text, nr_ocorrencia="N/A", channel_base_score=50):
     """
-    Análise 2: Risco de reclamações EXTERNAS serem REPETIDAS/ESCALADAS (0-100)
+    EIXO 2: Análise de risco de reclamações EXTERNAS serem ESCALADAS/REPETIDAS (100-1000 pontos)
+    
+    Usa a metodologia completa do código original SRO para externalização
+    Base: 100-1000 pontos (10x a escala original para dar mais granularidade)
     """
     
-    prompt = f"""Você é um analista de risco especializado em prever reincidência e escalação de reclamações externas.
+    prompt = f"""Você é um analista preditivo especializado em prever escalação e reincidência de reclamações externas.
 
 CONTEXTO:
-Esta é uma reclamação EXTERNA classificada como: {channel_type}
-Peso base do canal: {channel_risk_score} pontos
+Esta é uma reclamação EXTERNA (NR_OCORRENCIA: {nr_ocorrencia})
+Peso base do canal: {channel_base_score} pontos
 
 TEXTO DA RECLAMAÇÃO:
-{text_content}
+{text}
 
 TAREFA:
-Analise o texto e calcule o risco (0-100) de o cliente RECLAMAR NOVAMENTE ou ESCALAR para outros canais.
+Analise o texto e calcule o risco (0-1000 pontos) de o cliente ESCALAR ou RECLAMAR NOVAMENTE.
 
-FATORES A CONSIDERAR:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+METODOLOGIA DE ANÁLISE (EIXO 2 - EXTERNALIZAÇÃO E ESCALAÇÃO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. INSATISFAÇÃO COM RESOLUÇÃO ANTERIOR (peso crítico):
-   - "Não resolveram", "continua o problema": +25 pts
-   - "Mesma situação de antes", "voltou a acontecer": +20 pts
-   - "Já reclamei antes": +15 pts
-   - Menção a múltiplas reclamações anteriores: +30 pts
+Fatores de Externalização e Escalação:
 
-2. ESCALAÇÃO PROGRESSIVA (peso alto):
-   - Menção a canais adicionais ("agora vou ao Procon", "vou processar"): +25 pts cada
-   - Ameaças jurídicas após reclamação externa: +35 pts
-   - Menção a advogado após ReclameAqui: +40 pts
-   - "Última tentativa antes de processar": +45 pts
+1. INDICADORES TEXTUAIS DE EXTERNALIZAÇÃO – Peso 5 (máximo 500 pontos)
 
-3. GRAVIDADE DO CANAL ATUAL (peso base):
-   - Ext. Ouvidoria (100 pts): já é crítico, risco de ação jurídica
-   - Web - Reclame Aqui (75 pts): risco de Procon/jurídico
-   - Externo (75 pts): risco de canais formais
-   - Externo - Focais (50 pts): risco de ReclameAqui/Procon
+   A. Menções Explícitas a Canais Externos (100 pts cada):
+      - "reclame aqui", "reclameaqui" → +100 pts
+      - "procon" → +100 pts
+      - "advogado", "jurídico", "processar" → +100 pts cada
+      - "ouvidoria" (da seguradora) → +80 pts
+      - "google", "avaliar", "avaliação" → +50 pts cada
+   
+   B. Palavras Emocionais Críticas (30 pts cada):
+      - "absurdo", "inaceitável", "prejuízo"
+      - "indignado", "revoltado", "insatisfeito", "furioso"
+   
+   C. Escalação Progressiva:
+      - 2+ palavras-chave de externalização → +100 pts bônus
+      - 3+ palavras-chave → +200 pts bônus
+   
+   D. Frases de Ameaça Direta (150 pts cada):
+      - "vou publicar", "vou denunciar", "vou processar", "vou ao procon"
+   
+   E. PADRÕES COMPORTAMENTAIS DE ESCALAÇÃO (150 pts máximo):
+      
+      Menção a corretor/corretora:
+      - "vou falar com meu corretor", "meu corretor vai saber" → +80 pts
+      
+      Ameaça de acionar seguradora:
+      - "vou ligar na seguradora", "vou acionar o SAC" → +100 pts
+      - "vou falar com a [Porto/Bradesco/Azul/etc]" → +100 pts
+      
+      Múltiplos canais de contato:
+      - 2 canais (telefone + email) → +50 pts
+      - 3+ canais (telefone + email + WhatsApp) → +100 pts
+      
+      Redes sociais:
+      - "vou expor nas redes sociais" → +80 pts
+      - "vou postar no Facebook/Instagram/Twitter" → +70 pts
+      - "vou fazer um vídeo" → +100 pts
+      
+      Ultimatos:
+      - "é a última vez que ligo", "última oportunidade" → +80 pts
+      - "se não resolver até [data]", "prazo de X dias" → +80 pts
+      - "já tentei X vezes" → +50 pts
+      
+      Frustração com processo:
+      - "já falei com X atendentes diferentes" → +70 pts
+      - "cada um me dá uma informação diferente" → +60 pts
+      - "ninguém resolve nada", "não consigo solução" → +80 pts
+      - "estou há X dias tentando resolver" → +60 pts
 
-4. ESTADO EMOCIONAL ATUAL (peso médio):
-   - Frustração extrema ("cansado", "desistindo"): +20 pts
-   - Raiva/indignação crescente: +15 pts
-   - Menção a prejuízo financeiro/tempo: +10 pts
+2. INSATISFAÇÃO COM RESOLUÇÃO ANTERIOR – Peso 3 (máximo 300 pontos)
+   - "Não resolveram", "continua o problema" → +250 pts
+   - "Mesma situação de antes", "voltou a acontecer" → +200 pts
+   - "Já reclamei antes" → +150 pts
+   - Múltiplas reclamações anteriores → +300 pts
 
-5. PADRÃO DE COMPORTAMENTO (peso médio):
-   - Cliente persistente (múltiplos contatos): +15 pts
-   - Cliente documenta tudo: +10 pts
-   - Cliente menciona prazos legais: +20 pts
+3. GRAVIDADE DO CANAL ATUAL – Peso 2 (máximo 200 pontos)
+   - Ext. Ouvidoria (100 pts base): já crítico, risco jurídico → +200 pts
+   - Web - Reclame Aqui (75 pts base): risco Procon/jurídico → +150 pts
+   - Externo (75 pts base): risco canais formais → +150 pts
+   - Externo - Focais (50 pts base): risco ReclameAqui/Procon → +100 pts
+
+CÁLCULO FINAL:
+1. Some todos os pontos dos fatores acima
+2. Adicione o peso base do canal
+3. Resultado: 0-1000 pontos (escala ampliada para melhor granularidade)
+4. Classifique:
+   - Baixo: 100-300 pontos
+   - Médio: 301-500 pontos
+   - Alto: 501-750 pontos
+   - Crítico: 751-1000 pontos
 
 FORMATO DE SAÍDA (JSON):
 {{
-    "risk_score": <número de 0 a 100>,
+    "risk_score": <número de 0 a 1000>,
     "risk_level": "<Baixo/Médio/Alto/Crítico>",
+    "external_indicators_score": <0-500>,
+    "previous_dissatisfaction_score": <0-300>,
+    "channel_gravity_score": <0-200>,
+    "channel_base_score": {channel_base_score},
     "repeat_probability": "<Baixa/Média/Alta/Muito Alta>",
     "escalation_channels": ["canal1", "canal2"],
     "previous_complaints_detected": <true/false>,
+    "behavioral_patterns": ["padrão1", "padrão2"],
     "key_indicators": ["indicador1", "indicador2"],
     "urgency_level": "<Baixa/Média/Alta/Urgente>",
     "recommendation": "<recomendação de ação>"
 }}
 
-CLASSIFICAÇÃO:
-- Baixo: 0-30 (improvável repetir)
-- Médio: 31-60 (pode reclamar novamente)
-- Alto: 61-85 (provável escalação)
-- Crítico: 86-100 (escalação iminente)
-
 Retorne APENAS o JSON, sem texto adicional."""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "Você é um analista de risco especializado em prever reincidência de reclamações."},
+                {"role": "system", "content": "Você é um analista preditivo especializado em prever escalação de reclamações externas usando metodologia ponderada avançada."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=800
+            temperature=0.2,
+            max_tokens=1200
         )
         
         result_text = response.choices[0].message.content.strip()
-        
-        # Extrair JSON da resposta
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        
         if json_match:
             result = json.loads(json_match.group())
-            # Ajustar score baseado no peso do canal
-            base_score = result.get("risk_score", 0)
-            adjusted_score = min(100, int(base_score * 0.6 + channel_risk_score * 0.4))
-            result["risk_score"] = adjusted_score
-            result["channel_base_score"] = channel_risk_score
+            # Garantir que está na escala 100-1000
+            score = result.get("risk_score", 100)
+            if score < 100:
+                score = 100 + score  # Ajustar para mínimo de 100
+            result["risk_score"] = min(1000, score)
             return result
         else:
-            return {
-                "risk_score": channel_risk_score,
-                "risk_level": "Erro",
-                "repeat_probability": "N/A",
-                "escalation_channels": [],
-                "previous_complaints_detected": False,
-                "key_indicators": ["Erro ao processar resposta"],
-                "urgency_level": "N/A",
-                "recommendation": "Revisar manualmente",
-                "channel_base_score": channel_risk_score
-            }
+            return create_error_result_external(channel_base_score)
+            
     except Exception as e:
-        st.error(f"Erro na análise: {str(e)}")
-        return {
-            "risk_score": channel_risk_score,
-            "risk_level": "Erro",
-            "repeat_probability": "N/A",
-            "escalation_channels": [],
-            "previous_complaints_detected": False,
-            "key_indicators": [str(e)],
-            "urgency_level": "N/A",
-            "recommendation": "Erro na análise",
-            "channel_base_score": channel_risk_score
-        }
+        return create_error_result_external(channel_base_score, str(e))
+
+def create_error_result(error_msg):
+    """Resultado de erro para análise interna"""
+    return {
+        "risk_score": 0,
+        "risk_level": "Erro",
+        "frequency_score": 0,
+        "delay_score": 0,
+        "operational_score": 0,
+        "emotional_score": 0,
+        "key_factors": [error_msg],
+        "detected_threats": [],
+        "emotional_tone": "N/A",
+        "is_technical_negative": False,
+        "recommendation": "Revisar manualmente"
+    }
+
+def create_error_result_external(channel_base, error_msg="Erro na análise"):
+    """Resultado de erro para análise externa"""
+    return {
+        "risk_score": 100 + channel_base,
+        "risk_level": "Erro",
+        "external_indicators_score": 0,
+        "previous_dissatisfaction_score": 0,
+        "channel_gravity_score": 0,
+        "channel_base_score": channel_base,
+        "repeat_probability": "N/A",
+        "escalation_channels": [],
+        "previous_complaints_detected": False,
+        "behavioral_patterns": [],
+        "key_indicators": [error_msg],
+        "urgency_level": "N/A",
+        "recommendation": "Revisar manualmente"
+    }
 
 def process_excel_file(uploaded_file, client):
     """
-    Processa o arquivo Excel da planilha "Base Manifestações" e analisa cada linha
+    Processa o arquivo Excel da planilha "Base Manifestações"
     """
     try:
-        # Ler planilha "Base Manifestações"
         df = pd.read_excel(uploaded_file, sheet_name='Base Manifestações')
         
         st.info(f"📊 Planilha 'Base Manifestações' carregada: {len(df)} linhas, {len(df.columns)} colunas")
         
-        # Identificar colunas importantes
         col_names = df.columns.tolist()
         
-        # Coluna de canal (índice 30 = CANAL_DE_ENTRADA_MANIFESTACAO)
+        # Identificar colunas
         channel_col = col_names[30] if len(col_names) > 30 else None
         
-        # Coluna de histórico/texto (geralmente contém "HISTORICO" ou similar)
         text_col = None
         for col in col_names:
-            if 'HISTORICO' in str(col).upper() or 'MANIFESTACAO' in str(col).upper() or 'DESCRICAO' in str(col).upper():
+            if 'HISTORICO' in str(col).upper() or 'MANIFESTACAO' in str(col).upper():
                 text_col = col
                 break
         
-        # Se não encontrou, buscar coluna com textos longos
         if text_col is None:
             for col in df.columns:
                 if df[col].dtype == 'object':
                     avg_length = df[col].astype(str).str.len().mean()
-                    if avg_length > 100:  # Coluna com textos longos
+                    if avg_length > 100:
                         text_col = col
                         break
         
         st.write(f"**Coluna de Canal:** `{channel_col}`")
         st.write(f"**Coluna de Texto:** `{text_col}`")
         
-        # Mostrar preview
+        # Preview
         st.subheader("📋 Preview dos Dados")
-        preview_cols = [col for col in ['NR_OCORRENCIA', channel_col, 'TIPO_MANIFESTACAO', 'SITUACAO', text_col] if col in df.columns]
+        preview_cols = [col for col in ['NR_OCORRENCIA', channel_col, 'TIPO_MANIFESTACAO', 'SITUACAO'] if col in df.columns]
         st.dataframe(df[preview_cols].head(10) if preview_cols else df.head(10))
         
-        # Processar cada linha
+        # Processar
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -317,75 +399,86 @@ def process_excel_file(uploaded_file, client):
             status_text.text(f"Processando linha {idx + 1} de {len(df)}...")
             progress_bar.progress((idx + 1) / len(df))
             
-            # Obter canal e texto
             channel_value = row[channel_col] if channel_col else None
             text_value = row[text_col] if text_col else ""
             
-            # Classificar risco do canal
-            channel_risk, channel_type = classify_channel_risk(channel_value)
+            channel_type, channel_base = classify_channel_type(channel_value)
             
-            # Concatenar informações relevantes para análise
             nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
             tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
             situacao = row.get('SITUACAO', '')
             
-            full_text = f"Número da Ocorrência: {nr_ocorrencia}\n"
-            full_text += f"Tipo: {tipo_manifestacao}\n"
-            full_text += f"Situação: {situacao}\n"
-            full_text += f"Canal: {channel_value}\n\n"
-            full_text += f"Histórico: {text_value}"
+            full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
             
-            if not full_text or len(full_text.strip()) < 20:
-                full_text = "Sem informações textuais disponíveis"
-            
-            # Análise 1: Risco de interna virar externa
-            analysis1 = analyze_internal_to_external_risk(client, full_text, channel_type)
-            
-            # Análise 2: Risco de externa repetir (só para externas)
-            if channel_risk > 0:  # É externa
-                analysis2 = analyze_external_repeat_risk(client, full_text, channel_type, channel_risk)
-            else:  # É interna
-                analysis2 = {
-                    "risk_score": 0,
-                    "risk_level": "N/A (Interna)",
-                    "repeat_probability": "N/A",
-                    "escalation_channels": [],
-                    "previous_complaints_detected": False,
-                    "key_indicators": ["Reclamação interna"],
-                    "urgency_level": "N/A",
-                    "recommendation": "Monitorar para evitar externalização",
-                    "channel_base_score": 0
-                }
-            
-            results.append({
-                "Linha": idx + 1,
-                "NR_OCORRENCIA": nr_ocorrencia,
-                "Canal Original": channel_value,
-                "Canal Classificado": channel_type,
-                "Peso do Canal": channel_risk,
-                "Tipo Manifestação": tipo_manifestacao,
-                "Situação": situacao,
+            if channel_type == "Interno":
+                # Análise INTERNA: 0-100 pontos
+                analysis = analyze_internal_risk(client, full_text, nr_ocorrencia)
                 
-                # Análise 1: Interno → Externo
-                "Risco Interno→Externo (0-100)": analysis1.get("risk_score", 0),
-                "Nível Risco Int→Ext": analysis1.get("risk_level", "N/A"),
-                "Fatores Críticos Int→Ext": ", ".join(analysis1.get("key_factors", [])),
-                "Ameaças Detectadas": ", ".join(analysis1.get("detected_threats", [])),
-                "Tom Emocional": analysis1.get("emotional_tone", "N/A"),
+                results.append({
+                    "Linha": idx + 1,
+                    "NR_OCORRENCIA": nr_ocorrencia,
+                    "Canal Original": channel_value,
+                    "Tipo": channel_type,
+                    "Tipo Manifestação": tipo_manifestacao,
+                    "Situação": situacao,
+                    
+                    # Análise Interna (0-100)
+                    "Risco (0-100 ou 100-1000)": analysis.get("risk_score", 0),
+                    "Nível de Risco": analysis.get("risk_level", "N/A"),
+                    "Score Frequência": analysis.get("frequency_score", 0),
+                    "Score Atraso": analysis.get("delay_score", 0),
+                    "Score Operacional": analysis.get("operational_score", 0),
+                    "Score Emocional": analysis.get("emotional_score", 0),
+                    "Fatores Críticos": ", ".join(analysis.get("key_factors", [])),
+                    "Ameaças Detectadas": ", ".join(analysis.get("detected_threats", [])),
+                    "Tom Emocional": analysis.get("emotional_tone", "N/A"),
+                    "Negativa Técnica?": "Sim" if analysis.get("is_technical_negative", False) else "Não",
+                    "Recomendação": analysis.get("recommendation", "N/A"),
+                    
+                    # Campos vazios para externos
+                    "Padrões Comportamentais": "N/A (Interno)",
+                    "Canais de Escalação": "N/A (Interno)",
+                    "Reclamações Anteriores": "N/A (Interno)",
+                    "Urgência": "N/A (Interno)"
+                })
                 
-                # Análise 2: Externo → Repetição
-                "Risco Repetição Externa (0-100)": analysis2.get("risk_score", 0),
-                "Nível Risco Repetição": analysis2.get("risk_level", "N/A"),
-                "Probabilidade Repetir": analysis2.get("repeat_probability", "N/A"),
-                "Canais de Escalação": ", ".join(analysis2.get("escalation_channels", [])),
-                "Reclamações Anteriores": "Sim" if analysis2.get("previous_complaints_detected", False) else "Não",
-                "Indicadores Chave": ", ".join(analysis2.get("key_indicators", [])),
-                "Urgência": analysis2.get("urgency_level", "N/A"),
+            else:  # Externo
+                # Análise EXTERNA: 100-1000 pontos
+                analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
                 
-                # Recomendações
-                "Recomendação Int→Ext": analysis1.get("recommendation", "N/A"),
-                "Recomendação Repetição": analysis2.get("recommendation", "N/A")
-            })
+                results.append({
+                    "Linha": idx + 1,
+                    "NR_OCORRENCIA": nr_ocorrencia,
+                    "Canal Original": channel_value,
+                    "Tipo": channel_type,
+                    "Tipo Manifestação": tipo_manifestacao,
+                    "Situação": situacao,
+                    
+                    # Análise Externa (100-1000)
+                    "Risco (0-100 ou 100-1000)": analysis.get("risk_score", 100),
+                    "Nível de Risco": analysis.get("risk_level", "N/A"),
+                    "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
+                    "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
+                    "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
+                    "Peso Base Canal": analysis.get("channel_base_score", channel_base),
+                    "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
+                    "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
+                    "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
+                    "Reclamações Anteriores": "Sim" if analysis.get("previous_complaints_detected", False) else "Não",
+                    "Indicadores Chave": ", ".join(analysis.get("key_indicators", [])),
+                    "Urgência": analysis.get("urgency_level", "N/A"),
+                    "Recomendação": analysis.get("recommendation", "N/A"),
+                    
+                    # Campos vazios para internos
+                    "Score Frequência": "N/A (Externo)",
+                    "Score Atraso": "N/A (Externo)",
+                    "Score Operacional": "N/A (Externo)",
+                    "Score Emocional": "N/A (Externo)",
+                    "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])),
+                    "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])),
+                    "Tom Emocional": "N/A (Externo)",
+                    "Negativa Técnica?": "N/A (Externo)"
+                })
         
         progress_bar.empty()
         status_text.empty()
@@ -399,112 +492,146 @@ def process_excel_file(uploaded_file, client):
         return None
 
 # Interface principal
-st.title("⚠️ Análise de Risco de Externalização de Reclamações")
+st.title("⚠️ Análise de Risco de Externalização - Base Manifestações")
+st.markdown("**Sistema com Metodologia SRO Dual Avançada**")
 st.markdown("---")
 
 st.markdown("""
-### 📊 Como funciona:
+### 📊 Metodologia de Análise:
 
-Esta ferramenta analisa a planilha **"Base Manifestações"** e gera **duas análises de risco** (0-100):
+Esta ferramenta usa a **metodologia SRO dual avançada** para analisar a planilha "Base Manifestações":
 
-1. **Risco de Internalização → Externalização**: Probabilidade de reclamações internas virarem externas (ReclameAqui, Procon, Ouvidoria)
+#### 🟢 **INTERNOS: 0-100 pontos** (Risco de virar externo)
 
-2. **Risco de Repetição/Escalação Externa**: Para reclamações já externas, qual o risco de o cliente reclamar novamente ou escalar para outros canais
+**Fatores Ponderados:**
+1. **Frequência de Contatos** (Peso 4) - até 40 pts
+2. **Tempo de Espera/Atrasos** (Peso 3) - até 30 pts
+3. **Falhas Operacionais** (Peso 2) - até 20 pts
+4. **Estado Emocional** (Peso 1) - até 10 pts
 
-#### Pesos dos Canais (Coluna CANAL_DE_ENTRADA_MANIFESTACAO):
-- **Ext. Ouvidoria**: 100 pontos (🔴 mais crítico)
-- **Externo / Web - Reclame Aqui**: 75 pontos (🟠 alto)
-- **Externo - Focais**: 50 pontos (🟡 médio)
-- **Interno**: 0 pontos (🟢 base para análise)
+**Classificação:**
+- 0-30: 🟢 Baixo
+- 31-60: 🟡 Médio
+- 61-85: 🟠 Alto
+- 86-100: 🔴 Crítico
+
+#### 🔴 **EXTERNOS: 100-1000 pontos** (Risco de escalação/repetição)
+
+**Fatores Ponderados:**
+1. **Indicadores Textuais de Externalização** (Peso 5) - até 500 pts
+2. **Insatisfação com Resolução Anterior** (Peso 3) - até 300 pts
+3. **Gravidade do Canal Atual** (Peso 2) - até 200 pts
+
+**Padrões Comportamentais Detectados:**
+- Menção a corretor/seguradora
+- Múltiplos canais de contato
+- Ameaças a redes sociais
+- Ultimatos e prazos
+- Frustração com processo interno
+
+**Classificação:**
+- 100-300: 🟢 Baixo
+- 301-500: 🟡 Médio
+- 501-750: 🟠 Alto
+- 751-1000: 🔴 Crítico
+
+#### Pesos dos Canais Externos:
+- **Ext. Ouvidoria**: 100 pontos base
+- **Externo / Web - Reclame Aqui**: 75 pontos base
+- **Externo - Focais**: 50 pontos base
 """)
 
 st.markdown("---")
 
-# Upload de arquivo
+# Upload
 uploaded_file = st.file_uploader(
     "📁 Faça upload do Excel do dia (com planilha 'Base Manifestações')",
     type=['xlsx', 'xls'],
-    help="Arquivo Excel contendo a planilha 'Base Manifestações' com as reclamações"
+    help="Arquivo Excel contendo a planilha 'Base Manifestações'"
 )
 
 if uploaded_file is not None:
-    st.success("✅ Arquivo carregado com sucesso!")
+    st.success("✅ Arquivo carregado!")
     
-    if st.button("🚀 Iniciar Análise", type="primary"):
-        with st.spinner("🔍 Analisando reclamações da planilha 'Base Manifestações'... Isso pode levar alguns minutos."):
+    if st.button("🚀 Iniciar Análise Dual", type="primary"):
+        with st.spinner("🔍 Analisando com metodologia SRO dual... Isso pode levar alguns minutos."):
             results_df = process_excel_file(uploaded_file, client)
         
         if results_df is not None:
             st.success("✅ Análise concluída!")
             
-            # Estatísticas gerais
+            # Estatísticas
             st.subheader("📈 Estatísticas Gerais")
+            
+            internos = results_df[results_df["Tipo"] == "Interno"]
+            externos = results_df[results_df["Tipo"] == "Externo"]
             
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                avg_internal_risk = results_df["Risco Interno→Externo (0-100)"].mean()
-                st.metric("Risco Médio Int→Ext", f"{avg_internal_risk:.1f}/100")
+                st.metric("Total de Casos", len(results_df))
             
             with col2:
-                avg_external_risk = results_df["Risco Repetição Externa (0-100)"].mean()
-                st.metric("Risco Médio Repetição", f"{avg_external_risk:.1f}/100")
+                st.metric("Casos Internos", len(internos))
+                if len(internos) > 0:
+                    avg_int = internos["Risco (0-100 ou 100-1000)"].mean()
+                    st.caption(f"Risco médio: {avg_int:.1f}/100")
             
             with col3:
-                critical_internal = len(results_df[results_df["Risco Interno→Externo (0-100)"] >= 86])
-                st.metric("Casos Críticos Int→Ext", critical_internal)
+                st.metric("Casos Externos", len(externos))
+                if len(externos) > 0:
+                    avg_ext = externos["Risco (0-100 ou 100-1000)"].mean()
+                    st.caption(f"Risco médio: {avg_ext:.0f}/1000")
             
             with col4:
-                critical_external = len(results_df[results_df["Risco Repetição Externa (0-100)"] >= 86])
-                st.metric("Casos Críticos Repetição", critical_external)
+                criticos_int = len(internos[internos["Risco (0-100 ou 100-1000)"] >= 86])
+                criticos_ext = len(externos[externos["Risco (0-100 ou 100-1000)"] >= 751])
+                st.metric("Casos Críticos", criticos_int + criticos_ext)
+                st.caption(f"Int: {criticos_int} | Ext: {criticos_ext}")
             
-            # Distribuição por canal
-            st.subheader("📊 Distribuição por Canal")
+            # Distribuição
+            st.subheader("📊 Distribuição por Tipo")
             col_a, col_b = st.columns(2)
             
             with col_a:
-                channel_dist = results_df["Canal Classificado"].value_counts()
-                st.bar_chart(channel_dist)
+                type_dist = results_df["Tipo"].value_counts()
+                st.bar_chart(type_dist)
             
             with col_b:
-                st.write("**Contagem por Canal:**")
-                st.dataframe(channel_dist.reset_index().rename(columns={'index': 'Canal', 'Canal Classificado': 'Quantidade'}))
+                st.write("**Contagem:**")
+                st.dataframe(type_dist.reset_index().rename(columns={'index': 'Tipo', 'Tipo': 'Quantidade'}))
             
-            # Tabela de resultados
+            # Resultados
             st.subheader("📋 Resultados Detalhados")
             
-            # Colorir células baseado no risco
             def color_risk(val):
                 if isinstance(val, (int, float)):
-                    if val >= 86:
+                    if val >= 751 or (val < 100 and val >= 86):  # Crítico
                         return 'background-color: #ff4444; color: white'
-                    elif val >= 61:
+                    elif val >= 501 or (val < 100 and val >= 61):  # Alto
                         return 'background-color: #ff9944; color: white'
-                    elif val >= 31:
+                    elif val >= 301 or (val < 100 and val >= 31):  # Médio
                         return 'background-color: #ffdd44; color: black'
-                    else:
+                    else:  # Baixo
                         return 'background-color: #44ff44; color: black'
                 return ''
             
             styled_df = results_df.style.applymap(
                 color_risk,
-                subset=["Risco Interno→Externo (0-100)", "Risco Repetição Externa (0-100)"]
+                subset=["Risco (0-100 ou 100-1000)"]
             )
             
             st.dataframe(styled_df, use_container_width=True, height=400)
             
-            # Download dos resultados
+            # Download
             st.subheader("💾 Download dos Resultados")
             
-            # Gerar Excel
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"analise_risco_externalizacao_{timestamp}.xlsx"
+            output_filename = f"analise_risco_sro_dual_{timestamp}.xlsx"
             
-            # Salvar em buffer
-            from io import BytesIO
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                results_df.to_excel(writer, index=False, sheet_name='Análise de Risco')
+                results_df.to_excel(writer, index=False, sheet_name='Análise de Risco SRO')
             
             st.download_button(
                 label="📥 Baixar Resultados (Excel)",
@@ -516,20 +643,17 @@ if uploaded_file is not None:
             # Casos prioritários
             st.subheader("🚨 Casos Prioritários")
             
-            priority_cases = results_df[
-                (results_df["Risco Interno→Externo (0-100)"] >= 61) | 
-                (results_df["Risco Repetição Externa (0-100)"] >= 61)
-            ].sort_values(
-                by=["Risco Repetição Externa (0-100)", "Risco Interno→Externo (0-100)"],
-                ascending=False
+            priority_int = internos[internos["Risco (0-100 ou 100-1000)"] >= 61]
+            priority_ext = externos[externos["Risco (0-100 ou 100-1000)"] >= 501]
+            priority_cases = pd.concat([priority_int, priority_ext]).sort_values(
+                by="Risco (0-100 ou 100-1000)", ascending=False
             )
             
             if len(priority_cases) > 0:
                 st.warning(f"⚠️ {len(priority_cases)} casos requerem atenção prioritária!")
                 st.dataframe(
-                    priority_cases[["Linha", "NR_OCORRENCIA", "Canal Classificado", 
-                                   "Risco Interno→Externo (0-100)", "Risco Repetição Externa (0-100)", 
-                                   "Recomendação Int→Ext", "Recomendação Repetição"]],
+                    priority_cases[["Linha", "NR_OCORRENCIA", "Tipo", "Canal Original",
+                                   "Risco (0-100 ou 100-1000)", "Nível de Risco", "Recomendação"]],
                     use_container_width=True
                 )
             else:
@@ -542,8 +666,8 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 0.9em;'>
-    <p>Análise de Risco de Externalização | Powered by OpenAI GPT-4.1-mini</p>
-    <p>📊 Planilha analisada: <strong>Base Manifestações</strong></p>
-    <p>⚙️ Configure a chave da OpenAI em: Settings > Secrets > OPENAI_API_KEY</p>
+    <p><strong>Análise de Risco SRO Dual Avançada</strong> | Powered by OpenAI GPT-4.1-mini</p>
+    <p>📊 Metodologia: INTERNOS (0-100) | EXTERNOS (100-1000)</p>
+    <p>⚙️ Configure OPENAI_API_KEY em Settings > Secrets</p>
 </div>
 """, unsafe_allow_html=True)
