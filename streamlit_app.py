@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 import re
 from io import BytesIO
+import time
 
 st.set_page_config(
     page_title="Análise de Risco de Externalização - Base Manifestações",
@@ -395,8 +396,27 @@ def process_excel_file(uploaded_file, client):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        start_time = time.time()
+        times_per_row = []
+        
         for idx, row in df.iterrows():
-            status_text.text(f"Processando linha {idx + 1} de {len(df)}...")
+            row_start = time.time()
+            
+            # Calcular tempo previsto
+            if idx > 0:
+                avg_time_per_row = sum(times_per_row) / len(times_per_row)
+                remaining_rows = len(df) - (idx + 1)
+                estimated_seconds = remaining_rows * avg_time_per_row
+                estimated_minutes = int(estimated_seconds / 60)
+                
+                if estimated_minutes > 0:
+                    status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_minutes} minutos)")
+                else:
+                    estimated_secs = int(estimated_seconds)
+                    status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_secs} segundos)")
+            else:
+                status_text.text(f"Processando linha {idx + 1} de {len(df)}... (calculando tempo previsto...)")
+            
             progress_bar.progress((idx + 1) / len(df))
             
             channel_value = row[channel_col] if channel_col else None
@@ -441,6 +461,10 @@ def process_excel_file(uploaded_file, client):
                     "Reclamações Anteriores": "N/A (Interno)",
                     "Urgência": "N/A (Interno)"
                 })
+            
+            # Registrar tempo da linha
+            row_end = time.time()
+            times_per_row.append(row_end - row_start)
                 
             else:  # Externo
                 # Análise EXTERNA: 100-1000 pontos
@@ -479,9 +503,20 @@ def process_excel_file(uploaded_file, client):
                     "Tom Emocional": "N/A (Externo)",
                     "Negativa Técnica?": "N/A (Externo)"
                 })
+            
+            # Registrar tempo da linha
+            row_end = time.time()
+            times_per_row.append(row_end - row_start)
+        
+        # Tempo total
+        total_time = time.time() - start_time
+        total_minutes = int(total_time / 60)
+        total_seconds = int(total_time % 60)
         
         progress_bar.empty()
         status_text.empty()
+        
+        st.success(f"✅ Processamento concluído em {total_minutes}min {total_seconds}s")
         
         return pd.DataFrame(results)
         
