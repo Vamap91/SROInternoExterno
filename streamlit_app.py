@@ -20,6 +20,9 @@ except Exception as e:
     st.error("⚠️ Erro ao configurar OpenAI API. Verifique se a chave está configurada em Settings > Secrets do Streamlit.")
     st.stop()
 
+# Configurações
+BATCH_SIZE = 50  # Processar 50 linhas por vez
+
 def classify_internal_risk(score):
     """Classifica risco interno (0-100) de forma granular"""
     if score >= 75:
@@ -70,53 +73,65 @@ def analyze_internal_risk(client, text, nr_ocorrencia="N/A"):
     
     prompt = f"""Você é um analista preditivo especializado em prever o risco de reclamações internas se tornarem externas.
 
-CONTEXTO:
-Esta é uma reclamação INTERNA (NR_OCORRENCIA: {nr_ocorrencia})
+CONTEXTO: Reclamação INTERNA (NR_OCORRENCIA: {nr_ocorrencia})
 
-TEXTO DA RECLAMAÇÃO:
-{text}
+TEXTO: {text[:1500]}
 
-TAREFA:
-Analise o texto e calcule o risco (0-100 pontos) de esta reclamação INTERNA se tornar EXTERNA (ReclameAqui, Procon, Ouvidoria).
+TAREFA: Calcule o risco (0-100 pontos) de esta reclamação INTERNA se tornar EXTERNA.
 
-METODOLOGIA DE ANÁLISE (EIXO 1):
+METODOLOGIA:
+1. FREQUÊNCIA DE CONTATOS (Peso 4, máx 40 pts)
+2. TEMPO DE ESPERA (Peso 3, máx 30 pts)
+3. FALHAS OPERACIONAIS (Peso 2, máx 20 pts)
+4. ESTADO EMOCIONAL (Peso 1, máx 10 pts)
 
-Fatores Preditivos e Pesos:
+REGRA: Negativas técnicas sem insatisfação = máximo 30 pontos
 
-1. FREQUÊNCIA DE CONTATOS – Peso 4 (máximo 40 pontos)
-   - 1 contato: 0 pts
-   - 2 contatos: 5 pts
-   - 3+ contatos: 10 pts
+FORMATO JSON:
+{{"risk_score": <0-100>, "frequency_score": <0-40>, "delay_score": <0-30>, "operational_score": <0-20>, "emotional_score": <0-10>, "key_factors": ["fator1"], "detected_threats": ["ameaça1"], "emotional_tone": "descrição", "is_technical_negative": true/false, "recommendation": "ação"}}
 
-2. TEMPO DE ESPERA / ATRASOS – Peso 3 (máximo 30 pontos)
-   - Menção a atrasos: +10 pts
-   - Menção a "dias", "semanas" de espera: +10 pts
-   - Menção a prazos não cumpridos: +10 pts
+Retorne APENAS o JSON."""
 
-3. FALHAS OPERACIONAIS – Peso 2 (máximo 20 pontos)
-   - Indícios técnicos graves: 10 pts cada
-   - Falhas de processo: 5 pts cada
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "Você é um analista preditivo especializado."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=600
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        
+        if json_match:
+            return json.loads(json_match.group())
+        else:
+            return {"risk_score": 0, "frequency_score": 0, "delay_score": 0, "operational_score": 0, "emotional_score": 0, "key_factors": ["Erro"], "detected_threats": [], "emotional_tone": "N/A", "is_technical_negative": False, "recommendation": "Revisar"}
+            
+    except Exception as e:
+        return {"risk_score": 0, "frequency_score": 0, "delay_score": 0, "operational_score": 0, "emotional_score": 0, "key_factors": [str(e)], "detected_threats": [], "emotional_tone": "N/A", "is_technical_negative": False, "recommendation": "Erro"}
 
-4. ESTADO EMOCIONAL – Peso 1 (máximo 10 pontos)
-   - Termos negativos moderados: 1 pt cada
-   - Termos de risco jurídico: 3 pts cada
-   - Termos positivos: -1 pt cada
+def analyze_external_risk(client, text, nr_ocorrencia="N/A", channel_base_score=50):
+    """EIXO 2: Análise de risco de reclamações EXTERNAS serem ESCALADAS/REPETIDAS (100-1000 pontos)"""
+    
+    prompt = f"""Você é um analista preditivo especializado em prever escalação de reclamações externas.
 
-REGRA ESPECIAL: Negativas técnicas sem insatisfação = máximo 30 pontos
+CONTEXTO: Reclamação EXTERNA (NR_OCORRENCIA: {nr_ocorrencia}) | Peso base: {channel_base_score} pts
 
-FORMATO DE SAÍDA (JSON):
-{{
-    "risk_score": <número de 0 a 100>,
-    "frequency_score": <0-40>,
-    "delay_score": <0-30>,
-    "operational_score": <0-20>,
-    "emotional_score": <0-10>,
-    "key_factors": ["fator1", "fator2"],
-    "detected_threats": ["ameaça1", "ameaça2"],
-    "emotional_tone": "<descrição>",
-    "is_technical_negative": <true/false>,
-    "recommendation": "<recomendação>"
-}}
+TEXTO: {text[:1500]}
+
+TAREFA: Calcule o risco (100-1000 pontos) de o cliente ESCALAR ou RECLAMAR NOVAMENTE.
+
+METODOLOGIA:
+1. INDICADORES TEXTUAIS (Peso 5, máx 500 pts)
+2. INSATISFAÇÃO ANTERIOR (Peso 3, máx 300 pts)
+3. GRAVIDADE DO CANAL (Peso 2, máx 200 pts)
+
+FORMATO JSON:
+{{"risk_score": <100-1000>, "external_indicators_score": <0-500>, "previous_dissatisfaction_score": <0-300>, "channel_gravity_score": <0-200>, "channel_base_score": {channel_base_score}, "repeat_probability": "Baixa/Média/Alta/Muito Alta/Certeza", "escalation_channels": ["canal1"], "previous_complaints_detected": true/false, "behavioral_patterns": ["padrão1"], "key_indicators": ["indicador1"], "urgency_level": "Baixa/Média/Alta/Urgente", "recommendation": "ação"}}
 
 Retorne APENAS o JSON."""
 
@@ -135,77 +150,6 @@ Retorne APENAS o JSON."""
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         
         if json_match:
-            return json.loads(json_match.group())
-        else:
-            return create_error_result("Erro ao processar resposta")
-            
-    except Exception as e:
-        return create_error_result(str(e))
-
-def analyze_external_risk(client, text, nr_ocorrencia="N/A", channel_base_score=50):
-    """EIXO 2: Análise de risco de reclamações EXTERNAS serem ESCALADAS/REPETIDAS (100-1000 pontos)"""
-    
-    prompt = f"""Você é um analista preditivo especializado em prever escalação de reclamações externas.
-
-CONTEXTO:
-Esta é uma reclamação EXTERNA (NR_OCORRENCIA: {nr_ocorrencia})
-Peso base do canal: {channel_base_score} pontos
-
-TEXTO DA RECLAMAÇÃO:
-{text}
-
-TAREFA:
-Analise o texto e calcule o risco (100-1000 pontos) de o cliente ESCALAR ou RECLAMAR NOVAMENTE.
-
-METODOLOGIA DE ANÁLISE (EIXO 2):
-
-1. INDICADORES TEXTUAIS – Peso 5 (máximo 500 pontos)
-   - Menções a canais externos: 100 pts cada
-   - Palavras emocionais críticas: 30 pts cada
-   - Ameaças diretas: 150 pts cada
-   - Padrões comportamentais: até 150 pts
-
-2. INSATISFAÇÃO ANTERIOR – Peso 3 (máximo 300 pontos)
-   - "Não resolveram": +250 pts
-   - "Voltou a acontecer": +200 pts
-   - "Já reclamei antes": +150 pts
-
-3. GRAVIDADE DO CANAL – Peso 2 (máximo 200 pontos)
-   - Baseado no peso base do canal
-
-FORMATO DE SAÍDA (JSON):
-{{
-    "risk_score": <número de 100 a 1000>,
-    "external_indicators_score": <0-500>,
-    "previous_dissatisfaction_score": <0-300>,
-    "channel_gravity_score": <0-200>,
-    "channel_base_score": {channel_base_score},
-    "repeat_probability": "<Baixa/Média/Alta/Muito Alta/Certeza>",
-    "escalation_channels": ["canal1", "canal2"],
-    "previous_complaints_detected": <true/false>,
-    "behavioral_patterns": ["padrão1", "padrão2"],
-    "key_indicators": ["indicador1", "indicador2"],
-    "urgency_level": "<Baixa/Média/Alta/Urgente>",
-    "recommendation": "<recomendação>"
-}}
-
-Retorne APENAS o JSON."""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": "Você é um analista preditivo especializado."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1000
-        )
-        
-        result_text = response.choices[0].message.content.strip()
-        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-        
-        if json_match:
             result = json.loads(json_match.group())
             score = result.get("risk_score", 100)
             if score < 100:
@@ -213,123 +157,39 @@ Retorne APENAS o JSON."""
             result["risk_score"] = min(1000, score)
             return result
         else:
-            return create_error_result_external(channel_base_score)
+            return {"risk_score": 100 + channel_base_score, "external_indicators_score": 0, "previous_dissatisfaction_score": 0, "channel_gravity_score": 0, "channel_base_score": channel_base_score, "repeat_probability": "N/A", "escalation_channels": [], "previous_complaints_detected": False, "behavioral_patterns": [], "key_indicators": ["Erro"], "urgency_level": "N/A", "recommendation": "Revisar"}
             
     except Exception as e:
-        return create_error_result_external(channel_base_score, str(e))
+        return {"risk_score": 100 + channel_base_score, "external_indicators_score": 0, "previous_dissatisfaction_score": 0, "channel_gravity_score": 0, "channel_base_score": channel_base_score, "repeat_probability": "N/A", "escalation_channels": [], "previous_complaints_detected": False, "behavioral_patterns": [], "key_indicators": [str(e)], "urgency_level": "N/A", "recommendation": "Erro"}
 
-def create_error_result(error_msg):
-    """Resultado de erro para análise interna"""
-    return {
-        "risk_score": 0,
-        "frequency_score": 0,
-        "delay_score": 0,
-        "operational_score": 0,
-        "emotional_score": 0,
-        "key_factors": [error_msg],
-        "detected_threats": [],
-        "emotional_tone": "N/A",
-        "is_technical_negative": False,
-        "recommendation": "Revisar manualmente"
-    }
-
-def create_error_result_external(channel_base, error_msg="Erro na análise"):
-    """Resultado de erro para análise externa"""
-    return {
-        "risk_score": 100 + channel_base,
-        "external_indicators_score": 0,
-        "previous_dissatisfaction_score": 0,
-        "channel_gravity_score": 0,
-        "channel_base_score": channel_base,
-        "repeat_probability": "N/A",
-        "escalation_channels": [],
-        "previous_complaints_detected": False,
-        "behavioral_patterns": [],
-        "key_indicators": [error_msg],
-        "urgency_level": "N/A",
-        "recommendation": "Revisar manualmente"
-    }
-
-def process_internals_only(uploaded_file, client):
-    """Processa APENAS reclamações INTERNAS"""
-    try:
-        df = pd.read_excel(uploaded_file, sheet_name='Base Manifestações')
-        
-        col_names = df.columns.tolist()
-        channel_col = col_names[30] if len(col_names) > 30 else None
-        
-        text_col = None
-        for col in col_names:
-            if 'HISTORICO' in str(col).upper() or 'MANIFESTACAO' in str(col).upper():
-                text_col = col
-                break
-        
-        if text_col is None:
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    avg_length = df[col].astype(str).str.len().mean()
-                    if avg_length > 100:
-                        text_col = col
-                        break
-        
-        # Filtrar apenas INTERNOS
-        df_filtered = df.copy()
-        df_filtered['_channel_type'] = df_filtered[channel_col].apply(lambda x: classify_channel_type(x)[0])
-        df_internos = df_filtered[df_filtered['_channel_type'] == 'Interno'].copy()
-        
-        st.info(f"📊 Total de linhas: {len(df)} | **Internos: {len(df_internos)}** | Externos: {len(df) - len(df_internos)}")
-        
-        if len(df_internos) == 0:
-            st.warning("⚠️ Nenhuma reclamação interna encontrada!")
-            return None
-        
-        # Processar
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        start_time = time.time()
-        times_per_row = []
-        
-        for idx, (orig_idx, row) in enumerate(df_internos.iterrows()):
-            try:
-                row_start = time.time()
-                
-                # Calcular tempo previsto
-                if idx > 0:
-                    avg_time_per_row = sum(times_per_row) / len(times_per_row)
-                    remaining_rows = len(df_internos) - (idx + 1)
-                    estimated_seconds = remaining_rows * avg_time_per_row
-                    estimated_minutes = int(estimated_seconds / 60)
-                    
-                    if estimated_minutes > 0:
-                        status_text.text(f"Processando INTERNO {idx + 1} de {len(df_internos)}... (tempo previsto: {estimated_minutes} minutos)")
-                    else:
-                        estimated_secs = int(estimated_seconds)
-                        status_text.text(f"Processando INTERNO {idx + 1} de {len(df_internos)}... (tempo previsto: {estimated_secs} segundos)")
-                else:
-                    status_text.text(f"Processando INTERNO {idx + 1} de {len(df_internos)}... (calculando tempo previsto...)")
-                
-                progress_bar.progress((idx + 1) / len(df_internos))
-                
-                channel_value = row[channel_col] if channel_col else None
-                text_value = row[text_col] if text_col else ""
-                
-                nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
-                tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
-                situacao = row.get('SITUACAO', '')
-                
-                full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
-                
+def process_batch(df_batch, channel_col, text_col, client, batch_num, total_batches):
+    """Processa um lote de linhas"""
+    results = []
+    
+    for idx, row in df_batch.iterrows():
+        try:
+            channel_value = row[channel_col] if channel_col else None
+            text_value = row[text_col] if text_col else ""
+            
+            channel_type, channel_base = classify_channel_type(channel_value)
+            
+            nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
+            tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
+            situacao = row.get('SITUACAO', '')
+            
+            full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
+            
+            if channel_type == "Interno":
                 # Análise INTERNA
                 analysis = analyze_internal_risk(client, full_text, nr_ocorrencia)
                 score = analysis.get("risk_score", 0)
                 classification = classify_internal_risk(score)
                 
                 results.append({
-                    "Linha Original": orig_idx + 1,
+                    "Linha": idx + 1,
                     "NR_OCORRENCIA": nr_ocorrencia,
                     "Canal": channel_value,
+                    "Tipo": channel_type,
                     "Tipo Manifestação": tipo_manifestacao,
                     "Situação": situacao,
                     "Pontuação": score,
@@ -342,37 +202,61 @@ def process_internals_only(uploaded_file, client):
                     "Ameaças Detectadas": ", ".join(analysis.get("detected_threats", [])),
                     "Tom Emocional": analysis.get("emotional_tone", "N/A"),
                     "Negativa Técnica?": "Sim" if analysis.get("is_technical_negative", False) else "Não",
-                    "Recomendação": analysis.get("recommendation", "N/A")
+                    "Recomendação": analysis.get("recommendation", "N/A"),
+                    # Campos vazios para externos
+                    "Padrões Comportamentais": "N/A",
+                    "Canais de Escalação": "N/A",
+                    "Probabilidade Repetir": "N/A",
+                    "Urgência": "N/A"
                 })
                 
-                row_end = time.time()
-                times_per_row.append(row_end - row_start)
+            else:  # Externo
+                # Análise EXTERNA
+                analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
+                score = analysis.get("risk_score", 100)
+                classification = classify_external_risk(score)
                 
-            except Exception as e:
-                st.warning(f"⚠️ Erro na linha {orig_idx + 1}: {str(e)}")
-                continue
-        
-        total_time = time.time() - start_time
-        total_minutes = int(total_time / 60)
-        total_seconds = int(total_time % 60)
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        st.success(f"✅ Análise de INTERNOS concluída em {total_minutes}min {total_seconds}s")
-        
-        return pd.DataFrame(results)
-        
-    except Exception as e:
-        st.error(f"❌ Erro: {str(e)}")
-        import traceback
-        st.error(f"Detalhes: {traceback.format_exc()}")
-        return None
+                results.append({
+                    "Linha": idx + 1,
+                    "NR_OCORRENCIA": nr_ocorrencia,
+                    "Canal": channel_value,
+                    "Tipo": channel_type,
+                    "Tipo Manifestação": tipo_manifestacao,
+                    "Situação": situacao,
+                    "Pontuação": score,
+                    "Classificação": classification,
+                    "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
+                    "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
+                    "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
+                    "Peso Base Canal": analysis.get("channel_base_score", channel_base),
+                    "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
+                    "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
+                    "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
+                    "Urgência": analysis.get("urgency_level", "N/A"),
+                    "Recomendação": analysis.get("recommendation", "N/A"),
+                    # Campos vazios para internos
+                    "Score Frequência": "N/A",
+                    "Score Atraso": "N/A",
+                    "Score Operacional": "N/A",
+                    "Score Emocional": "N/A",
+                    "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])),
+                    "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])),
+                    "Tom Emocional": "N/A",
+                    "Negativa Técnica?": "N/A"
+                })
+                
+        except Exception as e:
+            st.warning(f"⚠️ Erro na linha {idx + 1}: {str(e)[:100]}")
+            continue
+    
+    return results
 
-def process_externals_only(uploaded_file, client):
-    """Processa APENAS reclamações EXTERNAS"""
+def process_excel_in_batches(uploaded_file, client):
+    """Processa o Excel em lotes de 50 linhas"""
     try:
         df = pd.read_excel(uploaded_file, sheet_name='Base Manifestações')
+        
+        st.info(f"📊 Total de linhas: {len(df)}")
         
         col_names = df.columns.tolist()
         channel_col = col_names[30] if len(col_names) > 30 else None
@@ -391,90 +275,55 @@ def process_externals_only(uploaded_file, client):
                         text_col = col
                         break
         
-        # Filtrar apenas EXTERNOS
-        df_filtered = df.copy()
-        df_filtered['_channel_info'] = df_filtered[channel_col].apply(classify_channel_type)
-        df_filtered['_channel_type'] = df_filtered['_channel_info'].apply(lambda x: x[0])
-        df_filtered['_channel_base'] = df_filtered['_channel_info'].apply(lambda x: x[1])
-        df_externos = df_filtered[df_filtered['_channel_type'] == 'Externo'].copy()
+        # Dividir em lotes
+        total_rows = len(df)
+        num_batches = (total_rows + BATCH_SIZE - 1) // BATCH_SIZE
         
-        st.info(f"📊 Total de linhas: {len(df)} | Internos: {len(df) - len(df_externos)} | **Externos: {len(df_externos)}**")
+        st.info(f"🔄 Processamento em {num_batches} lotes de até {BATCH_SIZE} linhas cada")
         
-        if len(df_externos) == 0:
-            st.warning("⚠️ Nenhuma reclamação externa encontrada!")
-            return None
-        
-        # Processar
-        results = []
+        all_results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
+        batch_info = st.empty()
         
         start_time = time.time()
-        times_per_row = []
         
-        for idx, (orig_idx, row) in enumerate(df_externos.iterrows()):
-            try:
-                row_start = time.time()
+        for batch_num in range(num_batches):
+            batch_start = batch_num * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, total_rows)
+            
+            df_batch = df.iloc[batch_start:batch_end]
+            
+            batch_info.info(f"📦 **Lote {batch_num + 1}/{num_batches}** | Linhas {batch_start + 1} a {batch_end} de {total_rows}")
+            
+            batch_start_time = time.time()
+            
+            # Processar lote
+            batch_results = process_batch(df_batch, channel_col, text_col, client, batch_num + 1, num_batches)
+            all_results.extend(batch_results)
+            
+            batch_time = time.time() - batch_start_time
+            
+            # Atualizar progresso
+            progress = (batch_num + 1) / num_batches
+            progress_bar.progress(progress)
+            
+            # Calcular tempo restante
+            if batch_num < num_batches - 1:
+                avg_batch_time = (time.time() - start_time) / (batch_num + 1)
+                remaining_batches = num_batches - (batch_num + 1)
+                estimated_seconds = remaining_batches * avg_batch_time
+                estimated_minutes = int(estimated_seconds / 60)
                 
-                # Calcular tempo previsto
-                if idx > 0:
-                    avg_time_per_row = sum(times_per_row) / len(times_per_row)
-                    remaining_rows = len(df_externos) - (idx + 1)
-                    estimated_seconds = remaining_rows * avg_time_per_row
-                    estimated_minutes = int(estimated_seconds / 60)
-                    
-                    if estimated_minutes > 0:
-                        status_text.text(f"Processando EXTERNO {idx + 1} de {len(df_externos)}... (tempo previsto: {estimated_minutes} minutos)")
-                    else:
-                        estimated_secs = int(estimated_seconds)
-                        status_text.text(f"Processando EXTERNO {idx + 1} de {len(df_externos)}... (tempo previsto: {estimated_secs} segundos)")
+                if estimated_minutes > 0:
+                    status_text.success(f"✅ Lote {batch_num + 1}/{num_batches} concluído em {int(batch_time)}s | Tempo previsto restante: ~{estimated_minutes} minutos")
                 else:
-                    status_text.text(f"Processando EXTERNO {idx + 1} de {len(df_externos)}... (calculando tempo previsto...)")
-                
-                progress_bar.progress((idx + 1) / len(df_externos))
-                
-                channel_value = row[channel_col] if channel_col else None
-                text_value = row[text_col] if text_col else ""
-                channel_base = row['_channel_base']
-                
-                nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
-                tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
-                situacao = row.get('SITUACAO', '')
-                
-                full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
-                
-                # Análise EXTERNA
-                analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
-                score = analysis.get("risk_score", 100)
-                classification = classify_external_risk(score)
-                
-                results.append({
-                    "Linha Original": orig_idx + 1,
-                    "NR_OCORRENCIA": nr_ocorrencia,
-                    "Canal": channel_value,
-                    "Tipo Manifestação": tipo_manifestacao,
-                    "Situação": situacao,
-                    "Pontuação": score,
-                    "Classificação": classification,
-                    "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
-                    "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
-                    "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
-                    "Peso Base Canal": analysis.get("channel_base_score", channel_base),
-                    "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
-                    "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
-                    "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
-                    "Reclamações Anteriores": "Sim" if analysis.get("previous_complaints_detected", False) else "Não",
-                    "Indicadores Chave": ", ".join(analysis.get("key_indicators", [])),
-                    "Urgência": analysis.get("urgency_level", "N/A"),
-                    "Recomendação": analysis.get("recommendation", "N/A")
-                })
-                
-                row_end = time.time()
-                times_per_row.append(row_end - row_start)
-                
-            except Exception as e:
-                st.warning(f"⚠️ Erro na linha {orig_idx + 1}: {str(e)}")
-                continue
+                    status_text.success(f"✅ Lote {batch_num + 1}/{num_batches} concluído em {int(batch_time)}s | Tempo previsto restante: ~{int(estimated_seconds)} segundos")
+            else:
+                status_text.success(f"✅ Lote {batch_num + 1}/{num_batches} concluído em {int(batch_time)}s")
+            
+            # Pequena pausa entre lotes para não sobrecarregar
+            time.sleep(0.5)
         
         total_time = time.time() - start_time
         total_minutes = int(total_time / 60)
@@ -482,10 +331,12 @@ def process_externals_only(uploaded_file, client):
         
         progress_bar.empty()
         status_text.empty()
+        batch_info.empty()
         
-        st.success(f"✅ Análise de EXTERNOS concluída em {total_minutes}min {total_seconds}s")
+        st.success(f"🎉 **Análise completa concluída em {total_minutes}min {total_seconds}s!**")
+        st.info(f"📊 Total de {len(all_results)} linhas processadas com sucesso")
         
-        return pd.DataFrame(results)
+        return pd.DataFrame(all_results)
         
     except Exception as e:
         st.error(f"❌ Erro: {str(e)}")
@@ -495,7 +346,7 @@ def process_externals_only(uploaded_file, client):
 
 # Interface principal
 st.title("⚠️ Análise de Risco de Externalização - Base Manifestações")
-st.markdown("**Sistema com Metodologia SRO Dual Avançada - Análises Separadas**")
+st.markdown("**Sistema com Metodologia SRO Dual Avançada - Processamento em Lotes**")
 st.markdown("---")
 
 st.markdown("""
@@ -512,12 +363,11 @@ st.markdown("""
 - **701-850**: 🟠 Muito Alto
 - **851-1000**: 🔴 **Vai Reclamar Novamente**
 
-### 💡 **Estratégia de Processamento:**
-Para evitar timeout, as análises foram separadas em dois botões:
-1. **Analisar INTERNOS** → Gera Excel com internos
-2. **Analisar EXTERNOS** → Gera Excel com externos
-
-Você pode processar um de cada vez e depois juntar os resultados!
+### 💡 **Processamento em Lotes:**
+- 📦 **50 linhas por lote** (internos + externos juntos)
+- ⏱️ **Tempo previsto** atualizado após cada lote
+- ✅ **Progresso visual** em tempo real
+- 🚀 **Sem timeout** - Lotes pequenos processam rapidamente
 """)
 
 st.markdown("---")
@@ -532,93 +382,102 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     st.success("✅ Arquivo carregado!")
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🟢 Analisar INTERNOS (0-100)", type="primary", use_container_width=True):
-            with st.spinner("🔍 Analisando reclamações INTERNAS..."):
-                results_df = process_internals_only(uploaded_file, client)
+    if st.button("🚀 Iniciar Análise Completa (em lotes)", type="primary", use_container_width=True):
+        with st.spinner("🔍 Iniciando análise em lotes..."):
+            results_df = process_excel_in_batches(uploaded_file, client)
+        
+        if results_df is not None and len(results_df) > 0:
+            st.success("✅ Análise completa concluída!")
             
-            if results_df is not None:
-                st.success("✅ Análise de INTERNOS concluída!")
-                
-                # Estatísticas
-                st.subheader("📈 Estatísticas - INTERNOS")
-                
-                col_a, col_b, col_c = st.columns(3)
-                
-                with col_a:
-                    st.metric("Total Internos", len(results_df))
-                
-                with col_b:
-                    avg_score = results_df["Pontuação"].mean()
-                    st.metric("Pontuação Média", f"{avg_score:.1f}/100")
-                
-                with col_c:
-                    criticos = len(results_df[results_df["Pontuação"] >= 75])
-                    st.metric("Casos Críticos (≥75)", criticos)
-                
-                # Resultados
-                st.subheader("📋 Resultados - INTERNOS")
-                st.dataframe(results_df, use_container_width=True, height=400)
-                
-                # Download
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"analise_internos_{timestamp}.xlsx"
-                
-                buffer = BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    results_df.to_excel(writer, index=False, sheet_name='Internos')
-                
-                st.download_button(
-                    label="📥 Baixar Resultados INTERNOS (Excel)",
-                    data=buffer.getvalue(),
-                    file_name=output_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-    
-    with col2:
-        if st.button("🔴 Analisar EXTERNOS (100-1000)", type="secondary", use_container_width=True):
-            with st.spinner("🔍 Analisando reclamações EXTERNAS..."):
-                results_df = process_externals_only(uploaded_file, client)
+            # Estatísticas
+            st.subheader("📈 Estatísticas Gerais")
             
-            if results_df is not None:
-                st.success("✅ Análise de EXTERNOS concluída!")
-                
-                # Estatísticas
-                st.subheader("📈 Estatísticas - EXTERNOS")
-                
-                col_a, col_b, col_c = st.columns(3)
-                
-                with col_a:
-                    st.metric("Total Externos", len(results_df))
-                
-                with col_b:
-                    avg_score = results_df["Pontuação"].mean()
-                    st.metric("Pontuação Média", f"{avg_score:.0f}/1000")
-                
-                with col_c:
-                    criticos = len(results_df[results_df["Pontuação"] >= 851])
-                    st.metric("Vai Reclamar (≥851)", criticos)
-                
-                # Resultados
-                st.subheader("📋 Resultados - EXTERNOS")
+            internos = results_df[results_df["Tipo"] == "Interno"]
+            externos = results_df[results_df["Tipo"] == "Externo"]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total de Casos", len(results_df))
+            
+            with col2:
+                st.metric("Casos Internos", len(internos))
+                if len(internos) > 0:
+                    avg_int = internos["Pontuação"].mean()
+                    st.caption(f"Média: {avg_int:.1f}/100")
+            
+            with col3:
+                st.metric("Casos Externos", len(externos))
+                if len(externos) > 0:
+                    avg_ext = externos["Pontuação"].mean()
+                    st.caption(f"Média: {avg_ext:.0f}/1000")
+            
+            with col4:
+                criticos_int = len(internos[internos["Pontuação"] >= 75]) if len(internos) > 0 else 0
+                criticos_ext = len(externos[externos["Pontuação"] >= 851]) if len(externos) > 0 else 0
+                st.metric("Casos Críticos", criticos_int + criticos_ext)
+                st.caption(f"Int: {criticos_int} | Ext: {criticos_ext}")
+            
+            # Resultados
+            st.subheader("📋 Resultados Completos")
+            
+            # Tabs para separar internos e externos
+            tab1, tab2, tab3 = st.tabs(["📊 Todos", "🟢 Internos", "🔴 Externos"])
+            
+            with tab1:
                 st.dataframe(results_df, use_container_width=True, height=400)
-                
-                # Download
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"analise_externos_{timestamp}.xlsx"
-                
-                buffer = BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    results_df.to_excel(writer, index=False, sheet_name='Externos')
-                
-                st.download_button(
-                    label="📥 Baixar Resultados EXTERNOS (Excel)",
-                    data=buffer.getvalue(),
-                    file_name=output_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            
+            with tab2:
+                if len(internos) > 0:
+                    st.dataframe(internos, use_container_width=True, height=400)
+                else:
+                    st.info("Nenhuma reclamação interna encontrada")
+            
+            with tab3:
+                if len(externos) > 0:
+                    st.dataframe(externos, use_container_width=True, height=400)
+                else:
+                    st.info("Nenhuma reclamação externa encontrada")
+            
+            # Download
+            st.subheader("💾 Download dos Resultados")
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"analise_completa_sro_{timestamp}.xlsx"
+            
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                results_df.to_excel(writer, index=False, sheet_name='Análise Completa')
+                if len(internos) > 0:
+                    internos.to_excel(writer, index=False, sheet_name='Internos')
+                if len(externos) > 0:
+                    externos.to_excel(writer, index=False, sheet_name='Externos')
+            
+            st.download_button(
+                label="📥 Baixar Resultados Completos (Excel com 3 abas)",
+                data=buffer.getvalue(),
+                file_name=output_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            
+            # Casos prioritários
+            st.subheader("🚨 Casos Prioritários")
+            
+            priority_int = internos[internos["Pontuação"] >= 75] if len(internos) > 0 else pd.DataFrame()
+            priority_ext = externos[externos["Pontuação"] >= 851] if len(externos) > 0 else pd.DataFrame()
+            priority_cases = pd.concat([priority_int, priority_ext]) if len(priority_int) > 0 or len(priority_ext) > 0 else pd.DataFrame()
+            
+            if len(priority_cases) > 0:
+                priority_cases = priority_cases.sort_values(by="Pontuação", ascending=False)
+                st.warning(f"⚠️ {len(priority_cases)} casos requerem atenção prioritária!")
+                st.dataframe(
+                    priority_cases[["Linha", "NR_OCORRENCIA", "Tipo", "Canal",
+                                   "Pontuação", "Classificação", "Recomendação"]],
+                    use_container_width=True
                 )
+            else:
+                st.success("✅ Nenhum caso prioritário identificado!")
 
 else:
     st.info("👆 Faça upload de um arquivo Excel para começar a análise")
@@ -629,7 +488,7 @@ st.markdown("""
 <div style='text-align: center; color: #666; font-size: 0.9em;'>
     <p><strong>Análise de Risco SRO Dual Avançada</strong> | Powered by OpenAI GPT-4.1-mini</p>
     <p>📊 Metodologia: INTERNOS (0-100 granular) | EXTERNOS (100-1000 com 5 níveis)</p>
+    <p>📦 Processamento em lotes de {BATCH_SIZE} linhas para evitar timeout</p>
     <p>⚙️ Configure OPENAI_API_KEY em Settings > Secrets</p>
-    <p>💡 Análises separadas para evitar timeout do Streamlit Cloud</p>
 </div>
-""", unsafe_allow_html=True)
+""".format(BATCH_SIZE=BATCH_SIZE), unsafe_allow_html=True)
