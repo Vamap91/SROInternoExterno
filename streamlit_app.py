@@ -428,43 +428,44 @@ def process_excel_file(uploaded_file, client):
         times_per_row = []
         
         for idx, row in df.iterrows():
-            row_start = time.time()
-            
-            # Calcular tempo previsto
-            if idx > 0:
-                avg_time_per_row = sum(times_per_row) / len(times_per_row)
-                remaining_rows = len(df) - (idx + 1)
-                estimated_seconds = remaining_rows * avg_time_per_row
-                estimated_minutes = int(estimated_seconds / 60)
+            try:
+                row_start = time.time()
                 
-                if estimated_minutes > 0:
-                    status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_minutes} minutos)")
+                # Calcular tempo previsto
+                if idx > 0:
+                    avg_time_per_row = sum(times_per_row) / len(times_per_row)
+                    remaining_rows = len(df) - (idx + 1)
+                    estimated_seconds = remaining_rows * avg_time_per_row
+                    estimated_minutes = int(estimated_seconds / 60)
+                    
+                    if estimated_minutes > 0:
+                        status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_minutes} minutos)")
+                    else:
+                        estimated_secs = int(estimated_seconds)
+                        status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_secs} segundos)")
                 else:
-                    estimated_secs = int(estimated_seconds)
-                    status_text.text(f"Processando linha {idx + 1} de {len(df)}... (tempo previsto: {estimated_secs} segundos)")
-            else:
-                status_text.text(f"Processando linha {idx + 1} de {len(df)}... (calculando tempo previsto...)")
-            
-            progress_bar.progress((idx + 1) / len(df))
-            
-            channel_value = row[channel_col] if channel_col else None
-            text_value = row[text_col] if text_col else ""
-            
-            channel_type, channel_base = classify_channel_type(channel_value)
-            
-            nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
-            tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
-            situacao = row.get('SITUACAO', '')
-            
-            full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
-            
-            if channel_type == "Interno":
-                # Análise INTERNA: 0-100 pontos
-                analysis = analyze_internal_risk(client, full_text, nr_ocorrencia)
-                score = analysis.get("risk_score", 0)
-                classification = classify_internal_risk(score)
+                    status_text.text(f"Processando linha {idx + 1} de {len(df)}... (calculando tempo previsto...)")
                 
-                results.append({
+                progress_bar.progress((idx + 1) / len(df))
+                
+                channel_value = row[channel_col] if channel_col else None
+                text_value = row[text_col] if text_col else ""
+                
+                channel_type, channel_base = classify_channel_type(channel_value)
+                
+                nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
+                tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
+                situacao = row.get('SITUACAO', '')
+                
+                full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
+                
+                if channel_type == "Interno":
+                    # Análise INTERNA: 0-100 pontos
+                    analysis = analyze_internal_risk(client, full_text, nr_ocorrencia)
+                    score = analysis.get("risk_score", 0)
+                    classification = classify_internal_risk(score)
+                    
+                    results.append({
                     "Linha": idx + 1,
                     "NR_OCORRENCIA": nr_ocorrencia,
                     "Canal Original": channel_value,
@@ -489,52 +490,81 @@ def process_excel_file(uploaded_file, client):
                     "Padrões Comportamentais": "N/A (Interno)",
                     "Canais de Escalação": "N/A (Interno)",
                     "Reclamações Anteriores": "N/A (Interno)",
-                    "Urgência": "N/A (Interno)"
-                })
+                        "Urgência": "N/A (Interno)"
+                    })
+                    
+                else:  # Externo
+                    # Análise EXTERNA: 100-1000 pontos
+                    analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
+                    score = analysis.get("risk_score", 100)
+                    classification = classify_external_risk(score)
+                    
+                    results.append({
+                        "Linha": idx + 1,
+                        "NR_OCORRENCIA": nr_ocorrencia,
+                        "Canal Original": channel_value,
+                        "Tipo": channel_type,
+                        "Tipo Manifestação": tipo_manifestacao,
+                        "Situação": situacao,
+                        
+                        # Análise Externa (100-1000)
+                        "Pontuação": score,
+                        "Classificação": classification,
+                        "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
+                        "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
+                        "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
+                        "Peso Base Canal": analysis.get("channel_base_score", channel_base),
+                        "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
+                        "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
+                        "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
+                        "Reclamações Anteriores": "Sim" if analysis.get("previous_complaints_detected", False) else "Não",
+                        "Indicadores Chave": ", ".join(analysis.get("key_indicators", [])),
+                        "Urgência": analysis.get("urgency_level", "N/A"),
+                        "Recomendação": analysis.get("recommendation", "N/A"),
+                        
+                        # Campos vazios para internos
+                        "Score Frequência": "N/A (Externo)",
+                        "Score Atraso": "N/A (Externo)",
+                        "Score Operacional": "N/A (Externo)",
+                        "Score Emocional": "N/A (Externo)",
+                        "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])),
+                        "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])),
+                        "Tom Emocional": "N/A (Externo)",
+                        "Negativa Técnica?": "N/A (Externo)"
+                    })
+            
+                # Registrar tempo da linha
+                row_end = time.time()
+                times_per_row.append(row_end - row_start)
                 
-            else:  # Externo
-                # Análise EXTERNA: 100-1000 pontos
-                analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
-                score = analysis.get("risk_score", 100)
-                classification = classify_external_risk(score)
-                
+            except Exception as e:
+                st.warning(f"⚠️ Erro ao processar linha {idx + 1} (NR_OCORRENCIA: {row.get('NR_OCORRENCIA', 'N/A')}): {str(e)}")
+                # Adicionar resultado com erro
                 results.append({
                     "Linha": idx + 1,
-                    "NR_OCORRENCIA": nr_ocorrencia,
-                    "Canal Original": channel_value,
-                    "Tipo": channel_type,
-                    "Tipo Manifestação": tipo_manifestacao,
-                    "Situação": situacao,
-                    
-                    # Análise Externa (100-1000)
-                    "Pontuação": score,
-                    "Classificação": classification,
-                    "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
-                    "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
-                    "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
-                    "Peso Base Canal": analysis.get("channel_base_score", channel_base),
-                    "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
-                    "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
-                    "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
-                    "Reclamações Anteriores": "Sim" if analysis.get("previous_complaints_detected", False) else "Não",
-                    "Indicadores Chave": ", ".join(analysis.get("key_indicators", [])),
-                    "Urgência": analysis.get("urgency_level", "N/A"),
-                    "Recomendação": analysis.get("recommendation", "N/A"),
-                    
-                    # Campos vazios para internos
-                    "Score Frequência": "N/A (Externo)",
-                    "Score Atraso": "N/A (Externo)",
-                    "Score Operacional": "N/A (Externo)",
-                    "Score Emocional": "N/A (Externo)",
-                    "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])),
-                    "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])),
-                    "Tom Emocional": "N/A (Externo)",
-                    "Negativa Técnica?": "N/A (Externo)"
+                    "NR_OCORRENCIA": row.get('NR_OCORRENCIA', 'N/A'),
+                    "Canal Original": row.get(channel_col, 'N/A') if channel_col else 'N/A',
+                    "Tipo": "ERRO",
+                    "Tipo Manifestação": row.get('TIPO_MANIFESTACAO', ''),
+                    "Situação": row.get('SITUACAO', ''),
+                    "Pontuação": 0,
+                    "Classificação": f"ERRO: {str(e)[:50]}",
+                    "Score Frequência": "ERRO",
+                    "Score Atraso": "ERRO",
+                    "Score Operacional": "ERRO",
+                    "Score Emocional": "ERRO",
+                    "Fatores Críticos": str(e),
+                    "Ameaças Detectadas": "N/A",
+                    "Tom Emocional": "N/A",
+                    "Negativa Técnica?": "N/A",
+                    "Recomendação": "Revisar manualmente",
+                    "Padrões Comportamentais": "N/A",
+                    "Canais de Escalação": "N/A",
+                    "Reclamações Anteriores": "N/A",
+                    "Urgência": "N/A"
                 })
-            
-            # Registrar tempo da linha
-            row_end = time.time()
-            times_per_row.append(row_end - row_start)
+                # Continuar processamento
+                continue
         
         # Tempo total
         total_time = time.time() - start_time
