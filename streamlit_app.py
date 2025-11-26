@@ -20,6 +20,37 @@ except Exception as e:
     st.error("⚠️ Erro ao configurar OpenAI API. Verifique se a chave está configurada em Settings > Secrets do Streamlit.")
     st.stop()
 
+def classify_internal_risk(score):
+    """
+    Classifica risco interno (0-100) de forma granular
+    0-74: Classificação de 5 em 5 pontos
+    75-100: RISCO ALTO DE EXTERNALIZAR
+    """
+    if score >= 75:
+        return "🔴 RISCO ALTO DE EXTERNALIZAR"
+    else:
+        # Classificação granular de 5 em 5
+        lower = (score // 5) * 5
+        upper = lower + 5
+        if upper > 74:
+            upper = 74
+        return f"{lower}-{upper} pts"
+
+def classify_external_risk(score):
+    """
+    Classifica risco externo (100-1000)
+    """
+    if score >= 851:
+        return "🔴 Vai Reclamar Novamente"
+    elif score >= 701:
+        return "🟠 Muito Alto"
+    elif score >= 501:
+        return "🟡 Alto"
+    elif score >= 301:
+        return "🟢 Médio"
+    else:
+        return "⚪ Baixo"
+
 def classify_channel_type(channel_value):
     """
     Classifica o canal como Interno ou Externo
@@ -118,7 +149,7 @@ Fatores Preditivos e Pesos:
 
 REGRA ESPECIAL - Negativas Técnicas:
 Se o texto contém apenas negativa técnica/cancelamento SEM insatisfação explícita do cliente:
-→ Score máximo = 30 pontos (Baixo)
+→ Score máximo = 30 pontos
 
 Para elevar acima de 30, deve haver:
 - Manifestação direta de descontentamento
@@ -132,16 +163,14 @@ CÁLCULO FINAL:
 2. Multiplique pelo peso do fator
 3. Some os valores ponderados (máximo 100)
 4. Aplique regra especial se for negativa técnica
-5. Classifique:
-   - Baixo: 0-30 pontos
-   - Médio: 31-60 pontos
-   - Alto: 61-85 pontos
-   - Crítico: 86-100 pontos
+
+CLASSIFICAÇÃO:
+- 0-74 pontos: Classificação granular (será feita externamente)
+- 75-100 pontos: RISCO ALTO DE EXTERNALIZAR
 
 FORMATO DE SAÍDA (JSON):
 {{
     "risk_score": <número de 0 a 100>,
-    "risk_level": "<Baixo/Médio/Alto/Crítico>",
     "frequency_score": <0-40>,
     "delay_score": <0-30>,
     "operational_score": <0-20>,
@@ -268,21 +297,22 @@ CÁLCULO FINAL:
 1. Some todos os pontos dos fatores acima
 2. Adicione o peso base do canal
 3. Resultado: 0-1000 pontos (escala ampliada para melhor granularidade)
-4. Classifique:
-   - Baixo: 100-300 pontos
-   - Médio: 301-500 pontos
-   - Alto: 501-750 pontos
-   - Crítico: 751-1000 pontos
+
+CLASSIFICAÇÃO:
+- 100-300: Baixo
+- 301-500: Médio
+- 501-700: Alto
+- 701-850: Muito Alto
+- 851-1000: Vai Reclamar Novamente
 
 FORMATO DE SAÍDA (JSON):
 {{
     "risk_score": <número de 0 a 1000>,
-    "risk_level": "<Baixo/Médio/Alto/Crítico>",
     "external_indicators_score": <0-500>,
     "previous_dissatisfaction_score": <0-300>,
     "channel_gravity_score": <0-200>,
     "channel_base_score": {channel_base_score},
-    "repeat_probability": "<Baixa/Média/Alta/Muito Alta>",
+    "repeat_probability": "<Baixa/Média/Alta/Muito Alta/Certeza>",
     "escalation_channels": ["canal1", "canal2"],
     "previous_complaints_detected": <true/false>,
     "behavioral_patterns": ["padrão1", "padrão2"],
@@ -325,7 +355,6 @@ def create_error_result(error_msg):
     """Resultado de erro para análise interna"""
     return {
         "risk_score": 0,
-        "risk_level": "Erro",
         "frequency_score": 0,
         "delay_score": 0,
         "operational_score": 0,
@@ -341,7 +370,6 @@ def create_error_result_external(channel_base, error_msg="Erro na análise"):
     """Resultado de erro para análise externa"""
     return {
         "risk_score": 100 + channel_base,
-        "risk_level": "Erro",
         "external_indicators_score": 0,
         "previous_dissatisfaction_score": 0,
         "channel_gravity_score": 0,
@@ -433,6 +461,8 @@ def process_excel_file(uploaded_file, client):
             if channel_type == "Interno":
                 # Análise INTERNA: 0-100 pontos
                 analysis = analyze_internal_risk(client, full_text, nr_ocorrencia)
+                score = analysis.get("risk_score", 0)
+                classification = classify_internal_risk(score)
                 
                 results.append({
                     "Linha": idx + 1,
@@ -443,8 +473,8 @@ def process_excel_file(uploaded_file, client):
                     "Situação": situacao,
                     
                     # Análise Interna (0-100)
-                    "Risco (0-100 ou 100-1000)": analysis.get("risk_score", 0),
-                    "Nível de Risco": analysis.get("risk_level", "N/A"),
+                    "Pontuação": score,
+                    "Classificação": classification,
                     "Score Frequência": analysis.get("frequency_score", 0),
                     "Score Atraso": analysis.get("delay_score", 0),
                     "Score Operacional": analysis.get("operational_score", 0),
@@ -465,6 +495,8 @@ def process_excel_file(uploaded_file, client):
             else:  # Externo
                 # Análise EXTERNA: 100-1000 pontos
                 analysis = analyze_external_risk(client, full_text, nr_ocorrencia, channel_base)
+                score = analysis.get("risk_score", 100)
+                classification = classify_external_risk(score)
                 
                 results.append({
                     "Linha": idx + 1,
@@ -475,8 +507,8 @@ def process_excel_file(uploaded_file, client):
                     "Situação": situacao,
                     
                     # Análise Externa (100-1000)
-                    "Risco (0-100 ou 100-1000)": analysis.get("risk_score", 100),
-                    "Nível de Risco": analysis.get("risk_level", "N/A"),
+                    "Pontuação": score,
+                    "Classificação": classification,
                     "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
                     "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
                     "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
@@ -541,10 +573,8 @@ Esta ferramenta usa a **metodologia SRO dual avançada** para analisar a planilh
 4. **Estado Emocional** (Peso 1) - até 10 pts
 
 **Classificação:**
-- 0-30: 🟢 Baixo
-- 31-60: 🟡 Médio
-- 61-85: 🟠 Alto
-- 86-100: 🔴 Crítico
+- **0-74 pontos**: Classificação granular (0-5, 5-10, 10-15... 70-74)
+- **75-100 pontos**: 🔴 **RISCO ALTO DE EXTERNALIZAR**
 
 #### 🔴 **EXTERNOS: 100-1000 pontos** (Risco de escalação/repetição)
 
@@ -561,10 +591,11 @@ Esta ferramenta usa a **metodologia SRO dual avançada** para analisar a planilh
 - Frustração com processo interno
 
 **Classificação:**
-- 100-300: 🟢 Baixo
-- 301-500: 🟡 Médio
-- 501-750: 🟠 Alto
-- 751-1000: 🔴 Crítico
+- **100-300**: ⚪ Baixo
+- **301-500**: 🟢 Médio
+- **501-700**: 🟡 Alto
+- **701-850**: 🟠 Muito Alto
+- **851-1000**: 🔴 **Vai Reclamar Novamente**
 
 #### Pesos dos Canais Externos:
 - **Ext. Ouvidoria**: 100 pontos base
@@ -605,18 +636,18 @@ if uploaded_file is not None:
             with col2:
                 st.metric("Casos Internos", len(internos))
                 if len(internos) > 0:
-                    avg_int = internos["Risco (0-100 ou 100-1000)"].mean()
-                    st.caption(f"Risco médio: {avg_int:.1f}/100")
+                    avg_int = internos["Pontuação"].mean()
+                    st.caption(f"Pontuação média: {avg_int:.1f}/100")
             
             with col3:
                 st.metric("Casos Externos", len(externos))
                 if len(externos) > 0:
-                    avg_ext = externos["Risco (0-100 ou 100-1000)"].mean()
-                    st.caption(f"Risco médio: {avg_ext:.0f}/1000")
+                    avg_ext = externos["Pontuação"].mean()
+                    st.caption(f"Pontuação média: {avg_ext:.0f}/1000")
             
             with col4:
-                criticos_int = len(internos[internos["Risco (0-100 ou 100-1000)"] >= 86])
-                criticos_ext = len(externos[externos["Risco (0-100 ou 100-1000)"] >= 751])
+                criticos_int = len(internos[internos["Pontuação"] >= 75])
+                criticos_ext = len(externos[externos["Pontuação"] >= 851])
                 st.metric("Casos Críticos", criticos_int + criticos_ext)
                 st.caption(f"Int: {criticos_int} | Ext: {criticos_ext}")
             
@@ -637,19 +668,33 @@ if uploaded_file is not None:
             
             def color_risk(val):
                 if isinstance(val, (int, float)):
-                    if val >= 751 or (val < 100 and val >= 86):  # Crítico
-                        return 'background-color: #ff4444; color: white'
-                    elif val >= 501 or (val < 100 and val >= 61):  # Alto
-                        return 'background-color: #ff9944; color: white'
-                    elif val >= 301 or (val < 100 and val >= 31):  # Médio
-                        return 'background-color: #ffdd44; color: black'
-                    else:  # Baixo
-                        return 'background-color: #44ff44; color: black'
+                    # Internos (0-100)
+                    if val < 100:
+                        if val >= 75:
+                            return 'background-color: #ff4444; color: white; font-weight: bold'
+                        elif val >= 50:
+                            return 'background-color: #ffaa44; color: black'
+                        elif val >= 25:
+                            return 'background-color: #ffdd44; color: black'
+                        else:
+                            return 'background-color: #44ff44; color: black'
+                    # Externos (100-1000)
+                    else:
+                        if val >= 851:
+                            return 'background-color: #ff4444; color: white; font-weight: bold'
+                        elif val >= 701:
+                            return 'background-color: #ff9944; color: white'
+                        elif val >= 501:
+                            return 'background-color: #ffdd44; color: black'
+                        elif val >= 301:
+                            return 'background-color: #88ff88; color: black'
+                        else:
+                            return 'background-color: #dddddd; color: black'
                 return ''
             
             styled_df = results_df.style.applymap(
                 color_risk,
-                subset=["Risco (0-100 ou 100-1000)"]
+                subset=["Pontuação"]
             )
             
             st.dataframe(styled_df, use_container_width=True, height=400)
@@ -674,17 +719,17 @@ if uploaded_file is not None:
             # Casos prioritários
             st.subheader("🚨 Casos Prioritários")
             
-            priority_int = internos[internos["Risco (0-100 ou 100-1000)"] >= 61]
-            priority_ext = externos[externos["Risco (0-100 ou 100-1000)"] >= 501]
+            priority_int = internos[internos["Pontuação"] >= 75]
+            priority_ext = externos[externos["Pontuação"] >= 851]
             priority_cases = pd.concat([priority_int, priority_ext]).sort_values(
-                by="Risco (0-100 ou 100-1000)", ascending=False
+                by="Pontuação", ascending=False
             )
             
             if len(priority_cases) > 0:
                 st.warning(f"⚠️ {len(priority_cases)} casos requerem atenção prioritária!")
                 st.dataframe(
                     priority_cases[["Linha", "NR_OCORRENCIA", "Tipo", "Canal Original",
-                                   "Risco (0-100 ou 100-1000)", "Nível de Risco", "Recomendação"]],
+                                   "Pontuação", "Classificação", "Recomendação"]],
                     use_container_width=True
                 )
             else:
@@ -698,7 +743,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 0.9em;'>
     <p><strong>Análise de Risco SRO Dual Avançada</strong> | Powered by OpenAI GPT-4.1-mini</p>
-    <p>📊 Metodologia: INTERNOS (0-100) | EXTERNOS (100-1000)</p>
+    <p>📊 Metodologia: INTERNOS (0-100 granular) | EXTERNOS (100-1000 com 5 níveis)</p>
     <p>⚙️ Configure OPENAI_API_KEY em Settings > Secrets</p>
 </div>
 """, unsafe_allow_html=True)
