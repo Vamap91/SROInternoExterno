@@ -1,17 +1,13 @@
 import streamlit as st
 import pandas as pd
-from openai import AsyncOpenAI
+from openai import OpenAI
 import json
 from datetime import datetime
 import re
 from io import BytesIO
 import time
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import nest_asyncio
-
-# Permite asyncio funcionar no Streamlit
-nest_asyncio.apply()
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 st.set_page_config(
     page_title="Análise de Risco de Externalização - Base Manifestações",
@@ -21,14 +17,14 @@ st.set_page_config(
 
 # Configurar OpenAI API usando secrets do Streamlit
 try:
-    client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except Exception as e:
     st.error("⚠️ Erro ao configurar OpenAI API. Verifique se a chave está configurada em Settings > Secrets do Streamlit.")
     st.stop()
 
 # Configurações OTIMIZADAS
 BATCH_SIZE = 100  # Aumentado de 50 para 100
-CONCURRENT_REQUESTS = 20  # Processar 20 requisições em paralelo
+MAX_WORKERS = 20  # Número de threads paralelas
 MODEL = "gpt-4o-mini"  # Modelo mais rápido que gpt-4.1-mini
 MAX_TOKENS_INTERNAL = 400  # Reduzido de 600
 MAX_TOKENS_EXTERNAL = 500  # Reduzido de 800
@@ -78,8 +74,8 @@ def classify_channel_type(channel_value):
     else:
         return "Interno", 0
 
-async def analyze_internal_risk_async(client, text, nr_ocorrencia="N/A"):
-    """EIXO 1: Análise de risco de reclamações INTERNAS virarem EXTERNAS (0-100 pontos) - ASYNC"""
+def analyze_internal_risk(client, text, nr_ocorrencia="N/A"):
+    """EIXO 1: Análise de risco de reclamações INTERNAS virarem EXTERNAS (0-100 pontos)"""
     
     prompt = f"""Você é um analista preditivo especializado em prever o risco de reclamações internas se tornarem externas.
 
@@ -103,7 +99,7 @@ FORMATO JSON:
 Retorne APENAS o JSON."""
 
     try:
-        response = await client.chat.completions.create(
+        response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": "Você é um analista preditivo especializado."},
@@ -124,8 +120,8 @@ Retorne APENAS o JSON."""
     except Exception as e:
         return {"risk_score": 0, "frequency_score": 0, "delay_score": 0, "operational_score": 0, "emotional_score": 0, "key_factors": [str(e)[:50]], "detected_threats": [], "emotional_tone": "N/A", "is_technical_negative": False, "recommendation": "Erro"}
 
-async def analyze_external_risk_async(client, text, nr_ocorrencia="N/A", channel_base_score=50):
-    """EIXO 2: Análise de risco de reclamações EXTERNAS serem ESCALADAS/REPETIDAS (100-1000 pontos) - ASYNC"""
+def analyze_external_risk(client, text, nr_ocorrencia="N/A", channel_base_score=50):
+    """EIXO 2: Análise de risco de reclamações EXTERNAS serem ESCALADAS/REPETIDAS (100-1000 pontos)"""
     
     prompt = f"""Você é um analista preditivo especializado em prever escalação de reclamações externas.
 
@@ -146,7 +142,7 @@ FORMATO JSON:
 Retorne APENAS o JSON."""
 
     try:
-        response = await client.chat.completions.create(
+        response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": "Você é um analista preditivo especializado."},
@@ -172,9 +168,14 @@ Retorne APENAS o JSON."""
     except Exception as e:
         return {"risk_score": 100 + channel_base_score, "external_indicators_score": 0, "previous_dissatisfaction_score": 0, "channel_gravity_score": 0, "channel_base_score": channel_base_score, "repeat_probability": "N/A", "escalation_channels": [], "previous_complaints_detected": False, "behavioral_patterns": [], "key_indicators": [str(e)[:50]], "urgency_level": "N/A", "recommendation": "Erro"}
 
-async def process_single_row(row, idx, channel_col, text_col, client):
-    """Processa uma única linha de forma assíncrona"""
+def process_single_row(row_data):
+    """Processa uma única linha (será executada em thread separada)"""
+    idx, row, channel_col, text_col, client_key = row_data
+    
     try:
+        # Criar cliente OpenAI local para esta thread
+        local_client = OpenAI(api_key=client_key)
+        
         channel_value = row[channel_col] if channel_col else None
         text_value = row[text_col] if text_col else ""
         
@@ -188,7 +189,7 @@ async def process_single_row(row, idx, channel_col, text_col, client):
         
         if channel_type == "Interno":
             # Análise INTERNA
-            analysis = await analyze_internal_risk_async(client, full_text, nr_ocorrencia)
+            analysis = analyze_internal_risk(local_client, full_text, nr_ocorrencia)
             score = analysis.get("risk_score", 0)
             classification = classify_internal_risk(score)
             
@@ -219,7 +220,7 @@ async def process_single_row(row, idx, channel_col, text_col, client):
             
         else:  # Externo
             # Análise EXTERNA
-            analysis = await analyze_external_risk_async(client, full_text, nr_ocorrencia, channel_base)
+            analysis = analyze_external_risk(local_client, full_text, nr_ocorrencia, channel_base)
             score = analysis.get("risk_score", 100)
             classification = classify_external_risk(score)
             
@@ -255,25 +256,33 @@ async def process_single_row(row, idx, channel_col, text_col, client):
     except Exception as e:
         return None
 
-async def process_batch_async(df_batch, channel_col, text_col, client):
-    """Processa um lote de linhas em paralelo"""
+def process_batch_parallel(df_batch, channel_col, text_col, client_key):
+    """Processa um lote de linhas em PARALELO usando ThreadPoolExecutor"""
     
-    # Criar lista de tarefas assíncronas
-    tasks = []
-    for idx, row in df_batch.iterrows():
-        task = process_single_row(row, idx, channel_col, text_col, client)
-        tasks.append(task)
+    # Preparar dados para processamento paralelo
+    row_data_list = [
+        (idx, row, channel_col, text_col, client_key)
+        for idx, row in df_batch.iterrows()
+    ]
     
-    # Processar em grupos de CONCURRENT_REQUESTS
     results = []
-    for i in range(0, len(tasks), CONCURRENT_REQUESTS):
-        batch_tasks = tasks[i:i+CONCURRENT_REQUESTS]
-        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+    
+    # Processar em paralelo com ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submeter todas as tarefas
+        future_to_row = {
+            executor.submit(process_single_row, row_data): row_data[0]
+            for row_data in row_data_list
+        }
         
-        # Filtrar resultados válidos
-        for result in batch_results:
-            if result is not None and not isinstance(result, Exception):
-                results.append(result)
+        # Coletar resultados conforme completam
+        for future in as_completed(future_to_row):
+            try:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+            except Exception as e:
+                continue
     
     return results
 
@@ -301,11 +310,14 @@ def process_excel_in_batches_optimized(uploaded_file, client):
                         text_col = col
                         break
         
+        # Pegar API key para passar para threads
+        client_key = st.secrets["OPENAI_API_KEY"]
+        
         # Dividir em lotes
         total_rows = len(df)
         num_batches = (total_rows + BATCH_SIZE - 1) // BATCH_SIZE
         
-        st.info(f"🚀 **Modo OTIMIZADO**: {num_batches} lotes de até {BATCH_SIZE} linhas | {CONCURRENT_REQUESTS} requisições paralelas")
+        st.info(f"🚀 **Modo OTIMIZADO**: {num_batches} lotes de até {BATCH_SIZE} linhas | {MAX_WORKERS} threads paralelas")
         
         all_results = []
         progress_bar = st.progress(0)
@@ -324,8 +336,8 @@ def process_excel_in_batches_optimized(uploaded_file, client):
             
             batch_start_time = time.time()
             
-            # Processar lote de forma ASSÍNCRONA
-            batch_results = asyncio.run(process_batch_async(df_batch, channel_col, text_col, client))
+            # Processar lote de forma PARALELA
+            batch_results = process_batch_parallel(df_batch, channel_col, text_col, client_key)
             all_results.extend(batch_results)
             
             batch_time = time.time() - batch_start_time
@@ -393,11 +405,12 @@ st.markdown("""
 - **851-1000**: 🔴 **Vai Reclamar Novamente**
 
 ### ⚡ **OTIMIZAÇÕES APLICADAS:**
-- 🚀 **Processamento Paralelo Assíncrono**: Até 20 requisições simultâneas
+- 🚀 **Processamento Paralelo com Threads**: Até 20 threads simultâneas
 - 📦 **Lotes maiores**: 100 linhas por lote (vs 50 anterior)
 - ⚡ **Modelo mais rápido**: GPT-4o-mini (melhor custo-benefício)
 - 🎯 **Tokens reduzidos**: Menos overhead, mesma qualidade
 - 💨 **Velocidade 3-5x maior** que a versão anterior
+- ✅ **Sem dependências extras**: Funciona nativamente no Streamlit
 """)
 
 st.markdown("---")
@@ -518,8 +531,9 @@ st.markdown(f"""
 <div style='text-align: center; color: #666; font-size: 0.9em;'>
     <p><strong>⚡ Análise de Risco SRO Dual OTIMIZADA</strong> | Powered by OpenAI {MODEL}</p>
     <p>📊 Metodologia: INTERNOS (0-100 granular) | EXTERNOS (100-1000 com 5 níveis)</p>
-    <p>🚀 Processamento paralelo: {BATCH_SIZE} linhas/lote | {CONCURRENT_REQUESTS} requisições simultâneas</p>
+    <p>🚀 Processamento paralelo: {BATCH_SIZE} linhas/lote | {MAX_WORKERS} threads simultâneas</p>
     <p>💨 <strong>Velocidade 3-5x maior</strong> que a versão anterior</p>
+    <p>✅ <strong>Sem dependências extras</strong> - Funciona nativamente no Streamlit</p>
     <p>⚙️ Configure OPENAI_API_KEY em Settings > Secrets</p>
 </div>
 """, unsafe_allow_html=True)
