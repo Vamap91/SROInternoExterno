@@ -196,28 +196,32 @@ def process_single_row(row_data):
             
             return {
                 "Linha": idx + 1,
-                "NR_OCORRENCIA": nr_ocorrencia,
-                "Pedido": nr_pedido_wa,
-                "Canal": channel_value,
+                "NR_OCORRENCIA": nr_ocorrencia if nr_ocorrencia != 'N/A' else '',
+                "Pedido": nr_pedido_wa if nr_pedido_wa != 'N/A' else '',
+                "Canal": channel_value if channel_value else '',
                 "Tipo": channel_type,
                 "Tipo Manifestação": tipo_manifestacao,
                 "Situação": situacao,
                 "Pontuação": score,
                 "Classificação": classification,
-                "Score Frequência": analysis.get("frequency_score", 0),
-                "Score Atraso": analysis.get("delay_score", 0),
-                "Score Operacional": analysis.get("operational_score", 0),
-                "Score Emocional": analysis.get("emotional_score", 0),
-                "Fatores Críticos": ", ".join(analysis.get("key_factors", [])),
-                "Ameaças Detectadas": ", ".join(analysis.get("detected_threats", [])),
-                "Tom Emocional": analysis.get("emotional_tone", "N/A"),
+                "Score Frequência": analysis.get("frequency_score", 0) if analysis.get("frequency_score") is not None else 0,
+                "Score Atraso": analysis.get("delay_score", 0) if analysis.get("delay_score") is not None else 0,
+                "Score Operacional": analysis.get("operational_score", 0) if analysis.get("operational_score") is not None else 0,
+                "Score Emocional": analysis.get("emotional_score", 0) if analysis.get("emotional_score") is not None else 0,
+                "Fatores Críticos": ", ".join(analysis.get("key_factors", [])) if analysis.get("key_factors") else "",
+                "Ameaças Detectadas": ", ".join(analysis.get("detected_threats", [])) if analysis.get("detected_threats") else "",
+                "Tom Emocional": analysis.get("emotional_tone", "") if analysis.get("emotional_tone") and analysis.get("emotional_tone") != "N/A" else "",
                 "Negativa Técnica?": "Sim" if analysis.get("is_technical_negative", False) else "Não",
-                "Recomendação": analysis.get("recommendation", "N/A"),
-                # Campos vazios para externos
-                "Padrões Comportamentais": "N/A",
-                "Canais de Escalação": "N/A",
-                "Probabilidade Repetir": "N/A",
-                "Urgência": "N/A"
+                "Recomendação": analysis.get("recommendation", "") if analysis.get("recommendation") and analysis.get("recommendation") != "N/A" else "",
+                # Campos vazios para externos (internos não têm)
+                "Score Indicadores Externos": "",
+                "Score Insatisfação Anterior": "",
+                "Score Gravidade Canal": "",
+                "Peso Base Canal": "",
+                "Padrões Comportamentais": "",
+                "Canais de Escalação": "",
+                "Probabilidade Repetir": "",
+                "Urgência": ""
             }
             
         else:  # Externo
@@ -228,32 +232,32 @@ def process_single_row(row_data):
             
             return {
                 "Linha": idx + 1,
-                "NR_OCORRENCIA": nr_ocorrencia,
-                "Pedido": nr_pedido_wa,
-                "Canal": channel_value,
+                "NR_OCORRENCIA": nr_ocorrencia if nr_ocorrencia != 'N/A' else '',
+                "Pedido": nr_pedido_wa if nr_pedido_wa != 'N/A' else '',
+                "Canal": channel_value if channel_value else '',
                 "Tipo": channel_type,
                 "Tipo Manifestação": tipo_manifestacao,
                 "Situação": situacao,
                 "Pontuação": score,
                 "Classificação": classification,
-                "Score Indicadores Externos": analysis.get("external_indicators_score", 0),
-                "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0),
-                "Score Gravidade Canal": analysis.get("channel_gravity_score", 0),
-                "Peso Base Canal": analysis.get("channel_base_score", channel_base),
-                "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])),
-                "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])),
-                "Probabilidade Repetir": analysis.get("repeat_probability", "N/A"),
-                "Urgência": analysis.get("urgency_level", "N/A"),
-                "Recomendação": analysis.get("recommendation", "N/A"),
-                # Campos vazios para internos
-                "Score Frequência": "N/A",
-                "Score Atraso": "N/A",
-                "Score Operacional": "N/A",
-                "Score Emocional": "N/A",
-                "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])),
-                "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])),
-                "Tom Emocional": "N/A",
-                "Negativa Técnica?": "N/A"
+                "Score Indicadores Externos": analysis.get("external_indicators_score", 0) if analysis.get("external_indicators_score") is not None else 0,
+                "Score Insatisfação Anterior": analysis.get("previous_dissatisfaction_score", 0) if analysis.get("previous_dissatisfaction_score") is not None else 0,
+                "Score Gravidade Canal": analysis.get("channel_gravity_score", 0) if analysis.get("channel_gravity_score") is not None else 0,
+                "Peso Base Canal": analysis.get("channel_base_score", channel_base) if analysis.get("channel_base_score") is not None else channel_base,
+                "Padrões Comportamentais": ", ".join(analysis.get("behavioral_patterns", [])) if analysis.get("behavioral_patterns") else "",
+                "Canais de Escalação": ", ".join(analysis.get("escalation_channels", [])) if analysis.get("escalation_channels") else "",
+                "Probabilidade Repetir": analysis.get("repeat_probability", "") if analysis.get("repeat_probability") and analysis.get("repeat_probability") != "N/A" else "",
+                "Urgência": analysis.get("urgency_level", "") if analysis.get("urgency_level") and analysis.get("urgency_level") != "N/A" else "",
+                "Recomendação": analysis.get("recommendation", "") if analysis.get("recommendation") and analysis.get("recommendation") != "N/A" else "",
+                # Campos vazios para internos (externos não têm)
+                "Score Frequência": "",
+                "Score Atraso": "",
+                "Score Operacional": "",
+                "Score Emocional": "",
+                "Fatores Críticos": ", ".join(analysis.get("key_indicators", [])) if analysis.get("key_indicators") else "",
+                "Ameaças Detectadas": ", ".join(analysis.get("escalation_channels", [])) if analysis.get("escalation_channels") else "",
+                "Tom Emocional": "",
+                "Negativa Técnica?": ""
             }
             
     except Exception as e:
@@ -380,7 +384,25 @@ def process_excel_in_batches_optimized(uploaded_file, client):
         st.success(f"🎉 **Análise completa em {total_minutes}min {total_seconds}s!** | ⚡ Velocidade média: {avg_speed:.1f} linhas/seg")
         st.info(f"📊 Total de {len(all_results)} linhas processadas com sucesso")
         
-        return pd.DataFrame(all_results)
+        # Criar DataFrame e ordenar colunas
+        df_results = pd.DataFrame(all_results)
+        
+        # Definir ordem correta das colunas
+        colunas_ordenadas = [
+            "Linha", "NR_OCORRENCIA", "Pedido", "Canal", "Tipo", "Tipo Manifestação", "Situação",
+            "Pontuação", "Classificação",
+            "Score Frequência", "Score Atraso", "Score Operacional", "Score Emocional",
+            "Score Indicadores Externos", "Score Insatisfação Anterior", "Score Gravidade Canal", "Peso Base Canal",
+            "Fatores Críticos", "Ameaças Detectadas", "Tom Emocional", "Negativa Técnica?",
+            "Padrões Comportamentais", "Canais de Escalação", "Probabilidade Repetir", "Urgência",
+            "Recomendação"
+        ]
+        
+        # Reordenar apenas as colunas que existem
+        colunas_existentes = [col for col in colunas_ordenadas if col in df_results.columns]
+        df_results = df_results[colunas_existentes]
+        
+        return df_results
         
     except Exception as e:
         st.error(f"❌ Erro: {str(e)}")
