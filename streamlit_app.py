@@ -182,10 +182,11 @@ def process_single_row(row_data):
         channel_type, channel_base = classify_channel_type(channel_value)
         
         nr_ocorrencia = row.get('NR_OCORRENCIA', 'N/A')
+        nr_pedido_wa = row.get('NR_PEDIDO_WA', 'N/A')
         tipo_manifestacao = row.get('TIPO_MANIFESTACAO', '')
         situacao = row.get('SITUACAO', '')
         
-        full_text = f"Número: {nr_ocorrencia}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
+        full_text = f"Número: {nr_ocorrencia}\nPedido: {nr_pedido_wa}\nTipo: {tipo_manifestacao}\nSituação: {situacao}\nCanal: {channel_value}\n\nHistórico: {text_value}"
         
         if channel_type == "Interno":
             # Análise INTERNA
@@ -196,6 +197,7 @@ def process_single_row(row_data):
             return {
                 "Linha": idx + 1,
                 "NR_OCORRENCIA": nr_ocorrencia,
+                "Pedido": nr_pedido_wa,
                 "Canal": channel_value,
                 "Tipo": channel_type,
                 "Tipo Manifestação": tipo_manifestacao,
@@ -227,6 +229,7 @@ def process_single_row(row_data):
             return {
                 "Linha": idx + 1,
                 "NR_OCORRENCIA": nr_ocorrencia,
+                "Pedido": nr_pedido_wa,
                 "Canal": channel_value,
                 "Tipo": channel_type,
                 "Tipo Manifestação": tipo_manifestacao,
@@ -515,7 +518,7 @@ if uploaded_file is not None:
                 priority_cases = priority_cases.sort_values(by="Pontuação", ascending=False)
                 st.warning(f"⚠️ {len(priority_cases)} casos requerem atenção prioritária!")
                 st.dataframe(
-                    priority_cases[["Linha", "NR_OCORRENCIA", "Tipo", "Canal",
+                    priority_cases[["Linha", "NR_OCORRENCIA", "Pedido", "Tipo", "Canal",
                                    "Pontuação", "Classificação", "Recomendação"]],
                     use_container_width=True
                 )
