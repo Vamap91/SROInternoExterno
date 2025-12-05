@@ -411,7 +411,7 @@ def process_excel_in_batches_optimized(uploaded_file, client):
         return None
 
 # Interface principal
-st.title("⚠️ Análise de Risco de Externalização - Base Manifestações GRAZIIIIIIIIIIIIIIIIIIIIIII")
+st.title("⚠️ Análise de Risco de Externalização - Base Manifestações")
 st.markdown("**Sistema com Metodologia SRO Dual Avançada - ⚡ VERSÃO OTIMIZADA**")
 st.markdown("---")
 
